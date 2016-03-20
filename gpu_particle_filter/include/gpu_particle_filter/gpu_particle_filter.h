@@ -43,6 +43,8 @@ class ParticleFilterGPU {
     ParticleFilterGPU();
     virtual void imageCB(
         const sensor_msgs::Image::ConstPtr &);
+
+    void boxFilterCPU(cv::Mat &, const int);
 };
 
 #endif  // _GPU_PARTICLE_FILTER_H_

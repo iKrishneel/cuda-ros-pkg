@@ -46,7 +46,6 @@ T cuFloor(const T x) {
     return static_cast<T>(std::floor(x));
 }
 
-
 __global__
 void boxFilterGPU(int *pixels, const int fsize) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -130,4 +129,20 @@ void boxFilter(cv::Mat &image, const int size) {
     free(pixels);
     cudaEventDestroy(d_start);
     cudaEventDestroy(d_stop);
+}
+
+/*******************************************************/
+
+__global__
+void boxFilter2DGPU(int **pixels, const int fsize) {
+    
+}
+
+void boxFilter2D(cv::Mat &image, const int fsize) {
+    const int ROWS = static_cast<int>(image.rows);
+    const int COLS = static_cast<int>(image.cols);
+    const int STRIDE = 4;
+    int pixels[COLS][ROWS][STRIDE];
+
+    
 }

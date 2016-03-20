@@ -1,0 +1,8 @@
+<launch>
+  <arg name="image" default="/camera/rgb/image_rect_color" />
+  <node pkg="gpu_particle_filter" type="gpu_particle_filter_node"
+	name="gpu_particle_filter" output="screen" >
+    <remap from="image" to="$(arg image)" />
+    <remap from="target" to="/output/image" />
+  </node>
+</launch>
