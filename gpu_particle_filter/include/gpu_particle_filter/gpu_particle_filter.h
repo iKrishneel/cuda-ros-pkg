@@ -9,9 +9,6 @@
 #include <message_filters/sync_policies/approximate_time.h>
 
 #include <image_geometry/pinhole_camera_model.h>
-#include <sensor_msgs/Image.h>
-#include <sensor_msgs/image_encodings.h>
-#include <sensor_msgs/PointCloud2.h>
 #include <cv_bridge/cv_bridge.h>
 
 #include <opencv2/core/core.hpp>
@@ -21,13 +18,31 @@
 
 #include <geometry_msgs/PolygonStamped.h>
 #include <jsk_recognition_msgs/Rect.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/image_encodings.h>
+#include <sensor_msgs/PointCloud2.h>
 
+#include <gpu_particle_filter/particle_filter_kernel.h>
 #include <omp.h>
 
 class ParticleFilterGPU {
 
- public:
+ private:
+    boost::mutex lock_;
+    ros::NodeHandle pnh_;
+    ros::Subscriber sub_image_;
+    ros::Publisher pub_image_;
+    unsigned int threads_;
+    
+ protected:
+    virtual void onInit();
+    virtual void subscribe();
+    virtual void unsubscribe();
+    
+  public:
     ParticleFilterGPU();
+    virtual void imageCB(
+        const sensor_msgs::Image::ConstPtr &);
 };
 
 #endif  // _GPU_PARTICLE_FILTER_H_

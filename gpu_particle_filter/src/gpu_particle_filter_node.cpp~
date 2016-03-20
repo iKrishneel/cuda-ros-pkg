@@ -6,7 +6,7 @@ ParticleFilterGPU::ParticleFilterGPU() {
 
     std::cout << "GPU TEST"  << "\n";
 
-    char a[N] = "CUDA  \0\0\0\0\0\0";
+    char a[N] = "HELLO  \0\0\0\0\0\0";
     int b[N] = {
         15, 10, 6, 0, -11,
         1, 0, 0, 0, 0, 0,

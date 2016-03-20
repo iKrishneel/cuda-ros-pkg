@@ -1,5 +1,7 @@
 
-#include <gpu_particle_filter/gpu_particle_filter.h>
+// #include <gpu_particle_filter/gpu_particle_filter.h>
+#include <gpu_particle_filter/particle_filter_kernel.h>
+
 
 __global__
 void hello(char *a, int *b)
