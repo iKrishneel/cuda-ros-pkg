@@ -36,9 +36,11 @@ void ParticleFilterGPU::imageCB(
         return;
     }
 
-    cv::cvtColor(image, image, CV_BGR2GRAY);
-    boxFilter(image, 23);
-    cv::cvtColor(image, image, CV_GRAY2BGR);
+    // cv::cvtColor(image, image, CV_BGR2GRAY);
+    // boxFilter(image, 23);
+    // boxFilter2D(image, 3);
+    boxFilterMan(image, 12);
+    // cv::cvtColor(image, image, CV_GRAY2BGR);
 
     cv::namedWindow("image", cv::WINDOW_NORMAL);
     cv::imshow("image", image);
