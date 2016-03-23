@@ -142,6 +142,8 @@ include_directories(
 ## Declare a C++ executable
 cuda_add_executable(gpu_particle_filter_node 
   src/gpu_particle_filter_node.cpp
+  src/particle_filter.cpp
+  src/color_histogram.cpp
   src/particle_filter_kernel.cu
 )
 

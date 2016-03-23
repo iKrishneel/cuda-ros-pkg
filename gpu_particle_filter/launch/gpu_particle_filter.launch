@@ -2,7 +2,16 @@
   <arg name="image" default="/camera/rgb/image_rect_color" />
   <node pkg="gpu_particle_filter" type="gpu_particle_filter_node"
 	name="gpu_particle_filter" output="screen" >
-    <remap from="image" to="$(arg image)" />
-    <remap from="target" to="/output/image" />
+    <remap from="input_screen" to="$(arg image)/screenrectangle"/>
+    <remap from="image" to="$(arg image)"/>
+    <remap from="target" to="/gpu_particle_filter/output/image"/>
+  </node>
+  <node pkg="image_view2" type="image_view2"
+	name="image_view2" output="screen">
+    <remap from="image" to="$(arg image)"/>
+  </node>
+  <node pkg="image_view" type="image_view"
+	name="image_view" output="screen">
+    <remap from="image" to="/particle_filter_tracking/output/image"/>
   </node>
 </launch>
