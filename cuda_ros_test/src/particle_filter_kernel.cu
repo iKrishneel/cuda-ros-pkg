@@ -1,6 +1,5 @@
 
-// #include <gpu_particle_filter/gpu_particle_filter.h>
-#include <gpu_particle_filter/particle_filter_kernel.h>
+#include <cuda_ros_test/particle_filter_kernel.h>
 
 #define CUDA_ERROR_CHECK(process) {                \
         cudaAssert((process), __FILE__, __LINE__); \
