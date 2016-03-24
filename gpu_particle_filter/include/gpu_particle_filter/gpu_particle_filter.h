@@ -46,7 +46,7 @@ class ParticleFilterGPU: public ParticleFilter,
 
     cv::Mat dynamics;
     std::vector<Particle> particles;
-    cv::RNG randomNum;
+    cv::RNG random_num_;
     std::vector<cv::Point2f> particle_prev_position;
     cv::Mat prev_frame_;
     

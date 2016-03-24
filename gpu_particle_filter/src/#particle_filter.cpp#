@@ -4,7 +4,7 @@
 
 #include <gpu_particle_filter/particle_filter.h>
 
-ParticleFilter::ParticleFilter() : threads_(1) {
+ParticleFilter::ParticleFilter() : threads_(4) {
    
 }
 
@@ -31,7 +31,7 @@ std::vector<Particle> ParticleFilter::initialize_particles(
     int i;
 
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i)
+#pragma omp parallel for private(i)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
         Particle part__;
@@ -55,7 +55,7 @@ std::vector<Particle> ParticleFilter::transition(
     Particle *ptr = &transits[0];
     int i;
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i)
+#pragma omp parallel for private(i)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
        cv::Mat particleMD = cv::Mat(
@@ -96,7 +96,7 @@ std::vector<double> ParticleFilter::normalizeWeight(
 
     int i;
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i)
+#pragma omp parallel for private(i)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
        ptr[i] = static_cast<double>(z[i]/sum);
@@ -111,54 +111,22 @@ double ParticleFilter::gaussianNoise(
 
 std::vector<double> ParticleFilter::cumulativeSum(
     std::vector<double> &nWeights) {
-    std::vector<double> cumsum(NUM_PARTICLES);
-    double *ptr = &cumsum[0];
-    ptr[0] = nWeights[0];
-    int i;
-    for (i = 1 ; i < NUM_PARTICLES; i++) {
-        ptr[i] = nWeights[i] + ptr[i-1];
-    }
-    return cumsum;
-}
-
-void ParticleFilter::reSampling(
-    std::vector<Particle> &x_P, std::vector<Particle> &xP_Update,
-    std::vector<double> &nWeights) {
-    std::vector<double> cumsum = cumulativeSum(nWeights);
-    double s_ptX = static_cast<double>(
-       this->gaussianNoise(0, 1.0/NUM_PARTICLES));
-    // int cdf_stX = 1;
-    Particle p_arr[NUM_PARTICLES];
-    int i;
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i)
+    std::vector<double>             l for private(i)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
         p_arr[i] = x_P[i];
     }
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_)  \
-    shared(s_ptX, xP_Update, cumsum)
-#endif
-    for (int j = 0; j < NUM_PARTICLES; j++) {
-        double ptX = s_ptX + (1.0/NUM_PARTICLES)*(j-1);
-        
-        int cdf_stX = 1;
-
-        while (ptX > cumsum[cdf_stX]) {
-            cdf_stX++;
-        }
-        if (cdf_stX > NUM_PARTICLES) {
-            std::cout << "EXCEED: " << cdf_stX  << "\n";
-        }
-        p_arr[j] = xP_Update[cdf_stX];
+// #pragma omp parallel for private(cdf_stX) shared(s_ptX, xP_Update,       \
+um)
+                                #pragma omp parallel for shared(s_ptX, xP_Update,                                                                                                                                                                      p_arr[j] = xP_Update[cdf_stX];
     }
     x_P.clear();
     x_P.reserve(NUM_PARTICLES);
     Particle *ptr = &x_P[0];
     
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i) shared(p_arr)
+#pragma omp parallel for private(i) shared(p_arr)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
        ptr[i] = p_arr[i];
@@ -173,8 +141,7 @@ Particle ParticleFilter::meanArr(
     double sumDY = 0.0;
     int i;
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_) private(i) \
-    shared(xP_Update, sum, sumY, sumDX, sumDY)
+#pragma omp parallel for private(i) shared(xP_Update, sum, sumY, sumDX, sumDY)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
 #ifdef _OPENMP
@@ -206,7 +173,7 @@ void ParticleFilter::printParticles(
     cv::Mat &img, std::vector<Particle> &p) {
     int i;
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_)private(i) shared(p)
+#pragma omp parallel for private(i) shared(p)
 #endif
     for (i = 0; i < NUM_PARTICLES; i++) {
        cv::Point2f center = cv::Point2f(p[i].x, p[i].y);

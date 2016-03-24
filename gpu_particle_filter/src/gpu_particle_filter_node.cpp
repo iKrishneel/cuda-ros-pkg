@@ -60,6 +60,15 @@ void ParticleFilterGPU::imageCB(
         cv::resize(image, image, cv::Size(image.cols/this->downsize_,
                                           image.rows/this->downsize_));
     }
+
+    if (tracker_init_) {
+        bool is_init = true;
+        particleFilterGPU(image, screen_rect_, is_init);
+    } else {
+        ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
+    }
+    
+    /*
     if (this->tracker_init_) {
         ROS_INFO("Initializing Tracker");
         this->initializeTracker(image, this->screen_rect_);
@@ -71,7 +80,7 @@ void ParticleFilterGPU::imageCB(
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
-    
+    */
     cv_bridge::CvImagePtr pub_msg(new cv_bridge::CvImage);
     pub_msg->header = image_msg->header;
     pub_msg->encoding = sensor_msgs::image_encodings::BGR8;
@@ -83,13 +92,12 @@ void ParticleFilterGPU::imageCB(
     cv::waitKey(3);
 }
 
-
 void ParticleFilterGPU::initializeTracker(
     const cv::Mat &image, cv::Rect &rect) {
-    this->randomNum = cv::RNG();
+    this->random_num_ = cv::RNG();
     this->dynamics = this->state_transition();
     this->particles = this->initialize_particles(
-       this->randomNum, rect.x , rect.y,
+       this->random_num_, rect.x , rect.y,
        rect.x + rect.width, rect.y + rect.height);
     cv::Mat object_region = image(rect).clone();
     cv::Mat scene_region = image.clone();
@@ -116,7 +124,7 @@ void ParticleFilterGPU::runObjectTracker(
        return;
     }
     std::vector<Particle> x_particle = this->transition(
-       this->particles, this->dynamics, this->randomNum);
+       this->particles, this->dynamics, this->random_num_);
     std::vector<cv::Mat> particle_histogram = this->particleHistogram(
        image, x_particle);
     std::vector<double> color_probability = this->colorHistogramLikelihood(
