@@ -5,7 +5,10 @@
 
 ParticleFilterGPU::ParticleFilterGPU():
     block_size_(8), hbins(10), sbins(12), downsize_(2),
-    tracker_init_(false), threads_(8) {    
+    tracker_init_(false), threads_(8) {
+
+    gpu_init_ = true;
+    
     this->onInit();
 }
 
@@ -62,8 +65,7 @@ void ParticleFilterGPU::imageCB(
     }
 
     if (tracker_init_) {
-        bool is_init = true;
-        particleFilterGPU(image, screen_rect_, is_init);
+        particleFilterGPU(image, screen_rect_, gpu_init_);
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }

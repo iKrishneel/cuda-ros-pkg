@@ -13,7 +13,7 @@
 const int N = 16;
 
 #define BLOCK_SIZE 16
-#define PARTICLES_SIZE 5
+#define PARTICLES_SIZE 500
 #define STATE_SIZE 4
 
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);

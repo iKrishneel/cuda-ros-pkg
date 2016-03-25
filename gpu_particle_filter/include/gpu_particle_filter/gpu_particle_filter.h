@@ -49,6 +49,8 @@ class ParticleFilterGPU: public ParticleFilter,
     cv::RNG random_num_;
     std::vector<cv::Point2f> particle_prev_position;
     cv::Mat prev_frame_;
+
+    bool gpu_init_;
     
  protected:
     virtual void onInit();

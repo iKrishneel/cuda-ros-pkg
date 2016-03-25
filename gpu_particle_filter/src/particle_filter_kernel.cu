@@ -36,6 +36,11 @@ struct cuImage{
     unsigned char pixel[3];
 };
 
+// __host__
+cuParticles particles_[PARTICLES_SIZE];
+
+curandState_t *d_state_;
+
 /**
  * Cuda Shared memory operations
  */
@@ -83,9 +88,11 @@ cuMat cuMatrixProduct(cuMat A, cuMat B, cuMat c) {
 
         for (int j = 0; j < BLOCK_SIZE; j++) {
             c_value += as[row][j] * bs[j][col];
-            __syncthreads();
         }
+        __syncthreads();
+        // setElement(c, row, col, c_value);
         setElement(c_sub, row, col, c_value);
+        // c.elements[row * c.width + col] = c_value;
     }
 }
 
@@ -94,22 +101,26 @@ cuMat cuMatrixProduct(cuMat A, cuMat B, cuMat c) {
  */
 
 __device__ __constant__
-float cu_dynamics[STATE_SIZE][STATE_SIZE] = {{1, 0, 1, 0},
-                                             {0, 1, 0, 1},
-                                             {0, 0, 1, 0},
-                                             {0, 0, 0, 1}};    
+float DYNAMICS[STATE_SIZE][STATE_SIZE] = {{1, 0, 1, 0},
+                                          {0, 1, 0, 1},
+                                          {0, 0, 1, 0},
+                                          {0, 0, 0, 1}};    
 
 __device__
 cuMat getPFDynamics() {
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     cuMat dynamics;
-    dynamics.width = STATE_SIZE;
-    dynamics.height = STATE_SIZE;
-    dynamics.stride = STATE_SIZE;
-    float cu_dyna[STATE_SIZE * STATE_SIZE] = {1, 0, 1, 0,
-                                              0, 1, 0, 1,
-                                              0, 0, 1, 0,
-                                              0, 0, 0, 1};
-    dynamics.elements = cu_dyna;
+    if (t_idx == 0) {
+        dynamics.width = STATE_SIZE;
+        dynamics.height = STATE_SIZE;
+        dynamics.stride = STATE_SIZE;
+        float cu_dyna[STATE_SIZE * STATE_SIZE] = {1, 0, 1, 0,
+                                                  0, 1, 0, 1,
+                                                  0, 0, 1, 0,
+                                                  0, 0, 0, 1};
+        dynamics.elements = cu_dyna;
+    }
+    __syncthreads();
     return dynamics;
 }
 
@@ -180,50 +191,20 @@ int cuDivUp(int a, int b) {
     return ((a % b) != 0) ? (a / b + 1) : (a / b);
 }
 
-__host__
-void cuInitParticles(
-    curandState_t *d_state, cuParticles *particles, float *box_corners,
-    const dim3 block_size, const dim3 grid_size) {
-
-    srand(time(NULL));
-    
-    size_t dim = 4 * sizeof(float);
-    float *d_corners;
-    cudaMalloc((void**)&d_corners, dim);
-    cudaMemcpy(d_corners, box_corners, dim, cudaMemcpyHostToDevice);
-    cudaMalloc((void**)&d_state, PARTICLES_SIZE * sizeof(curandState_t));
-    curandInit<<<grid_size, block_size>>>(d_state, unsigned(time(NULL)));
-
-    cuParticles *d_particles;
-    cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
-    cuPFInitalizeParticles<<<grid_size, block_size>>>(
-        d_particles, d_state, d_corners);
-    dim = PARTICLES_SIZE * sizeof(cuParticles);
-    cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
-
-    cudaFree(d_corners);
-    cudaFree(d_particles);
-    
-}
-
-// __device__
-__global__
+__device__ __forceinline__
 void cuPFNormalizeWeights(float *weights) {
     __shared__ float cache[PARTICLES_SIZE];
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int cache_index = threadIdx.x;
     float temp = 0.0f;
-
-    printf("START: %d\n", t_idx);
     
     while (t_idx < PARTICLES_SIZE) {
         temp += weights[t_idx];
         t_idx += blockDim.x * gridDim.x;
     }
+    
     cache[cache_index] = temp;
     __syncthreads();
-
-    // printf("Temp: %f\n", temp);
     
     int i = blockDim.x/2;
     while (i != 0) {
@@ -248,52 +229,169 @@ void cuPFNormalizeWeights(float *weights) {
     }
 }
 
-__device__
-void cuPFTransition(cuParticles *particles, curandState_t *global_state) {
-    cuMat dynamics = getPFDynamics(); // move this
+__device__ __forceinline__
+void cuPFCumulativeSum(float *weights) {
+    __shared__ float weight_cache[PARTICLES_SIZE];
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    weight_cache[t_idx] = weights[t_idx];
     
+    int cache_index = threadIdx.x;
+    while (t_idx < PARTICLES_SIZE) {
+        if (t_idx > 0) {
+            weight_cache[t_idx] = weights[t_idx] + weight_cache[t_idx - 1];
+        }
+        __syncthreads();
+        t_idx += blockDim.x * gridDim.x;
+    }
+    __syncthreads();
+    
+    t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    if (offset < PARTICLES_SIZE) {
+        weights[offset] = weight_cache[offset];
+    }
+}
+
+__device__ __forceinline__
+void cuPFSequentialResample(
+    cuParticles *particles, cuParticles *prop_particles, float *weights) {
+    cuPFNormalizeWeights(weights);
+    __shared__ cuParticles cache[PARTICLES_SIZE];
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
     if (offset < PARTICLES_SIZE) {
-        cuMat part_mat;
-        part_mat.width = 1;
-        part_mat.height = STATE_SIZE;
-        part_mat.stride = 1;
+        cache[offset] = particles[offset];
+    }
+    __syncthreads();
+
+    if (offset == 0) {
+        const float s_ptx = 1.0f/PARTICLES_SIZE; // change to gaussian
+        int cdf_stx = 1;
+        for (int i = 0; i < PARTICLES_SIZE; i++) {
+            float ptx = s_ptx + (1.0/PARTICLES_SIZE) * (i - 1);
+            while (ptx > weights[cdf_stx]) {
+                cdf_stx++;
+            }
+            cache[i] = prop_particles[cdf_stx];
+        }
+    }
+
+    __syncthreads();
+    
+    if (offset < PARTICLES_SIZE) {
+        particles[offset] = cache[offset];
+    }
+}
+
+__device__
+void cuPFCenterRms(
+    cuParticles *center, const cuParticles *particles) {
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    cuParticles sum;
+    sum.x = 0.0f;
+    sum.y = 0.0f;
+    sum.dx = 0.0f;
+    sum.dy = 0.0f;
+    while (t_idx < PARTICLES_SIZE) {
+        sum.x += particles[t_idx].x;
+        sum.y += particles[t_idx].y;
+        sum.dx += particles[t_idx].dx;
+        sum.dy += particles[t_idx].dy;
+        t_idx += blockDim.x * gridDim.x;
+    }
+    __syncthreads();
+
+    center->x = static_cast<float>(sum.x/PARTICLES_SIZE);
+    center->y = static_cast<float>(sum.y/PARTICLES_SIZE);
+    center->dx = static_cast<float>(sum.dx/PARTICLES_SIZE);
+    center->dy = static_cast<float>(sum.dy/PARTICLES_SIZE);
+}
+
+__device__ __forceinline__
+void cuPFTransition(cuParticles *prop_particles,
+    const cuParticles *particles, curandState_t *global_state) {
+
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    // cuMat dynamics = getPFDynamics(); // move this    
+    
+    if (offset < PARTICLES_SIZE) {
+        // cuMat part_mat;
+        // part_mat.width = STATE_SIZE;
+        // part_mat.height = 1;
+        // part_mat.stride = 4;
         float element[STATE_SIZE] = {particles[offset].x,
                                      particles[offset].y,
                                      particles[offset].dx,
                                      particles[offset].dy};
-        part_mat.elements = element;
-        cuMat transition;
-        cuMatrixProduct(dynamics, part_mat, transition);
+        // part_mat.elements = element;
+        // cuMat transition;
+        // cuMatrixProduct(part_mat, dynamics, transition);
 
+        float transition[STATE_SIZE];
+        for (int i = 0; i < STATE_SIZE; i++) {
+            float sum = 0.0f;
+            for (int j = 0; j < STATE_SIZE; j++) {
+                sum += DYNAMICS[i][j] * element[j];
+            }
+            transition[i] = sum;
+        }
+        
+        // printf("%f %f %f\n", transition[0], element[0],
+        // particles[offset].x);
+        
         cuParticles nxt_particle;
-        nxt_particle.x = transition.elements[0] +
+        nxt_particle.x = transition[0] +
+            cuGenerateGaussian(global_state, offset);        
+        nxt_particle.y = transition[1] +
             cuGenerateGaussian(global_state, offset);
-        nxt_particle.y = transition.elements[1] +
+        nxt_particle.dx = transition[2] +
             cuGenerateGaussian(global_state, offset);
-        nxt_particle.dx = transition.elements[2] +
+        nxt_particle.dy = transition[3] +
             cuGenerateGaussian(global_state, offset);
-        nxt_particle.dy = transition.elements[3] +
-            cuGenerateGaussian(global_state, offset);
-
-        particles[offset] = nxt_particle;
-    }
-}
-
-__global__
-void cuPFTracking(cuParticles *particles) {
-    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
-    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
-    if (offset < PARTICLES_SIZE) {
-        cuParticles particle;
+        prop_particles[offset] = nxt_particle;
         
     }
 }
 
+__global__
+void cuPFPropagation(
+    cuParticles *trans_particles,
+    cuParticles *particles, curandState_t *global_state) {
+    cuPFTransition(trans_particles, particles, global_state);    
+}
 
+__host__
+void cuInitParticles(
+    cuParticles *particles, float *box_corners,
+    const dim3 block_size, const dim3 grid_size) {
+
+    srand(time(NULL));
+    
+    size_t dim = 4 * sizeof(float);
+    float *d_corners;
+    cudaMalloc((void**)&d_corners, dim);
+    cudaMemcpy(d_corners, box_corners, dim, cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&d_state_, PARTICLES_SIZE * sizeof(curandState_t));
+    curandInit<<<grid_size, block_size>>>(d_state_, unsigned(time(NULL)));
+
+    cuParticles *d_particles;
+    cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
+    cuPFInitalizeParticles<<<grid_size, block_size>>>(
+        d_particles, d_state_, d_corners);
+    dim = PARTICLES_SIZE * sizeof(cuParticles);
+    cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
+
+    cudaFree(d_corners);
+    cudaFree(d_particles);    
+}
+
+__host__
 void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     const int SIZE = static_cast<int>(image.rows * image.cols) * sizeof(cuImage);
     cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
@@ -315,11 +413,6 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     
     dim3 block_size(1, PARTICLES_SIZE);
     dim3 grid_size(1, 1);
-    
-    curandState_t *d_state;
-    cuParticles *particles = (cuParticles*)malloc(
-        sizeof(cuParticles) * PARTICLES_SIZE);
-
 
     cudaEvent_t d_start;
     cudaEvent_t d_stop;
@@ -327,30 +420,67 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
     
-    if (!is_init) {
-        cuInitParticles(d_state, particles, box_corners, block_size, grid_size);
-        // is_init = false;
+    if (is_init) {
+        printf("\033[34m INITIALIZING TRACKER \033[0m\n");
+        cuInitParticles(particles_, box_corners, block_size, grid_size);
+        is_init = false;
+    } else {
+        cuParticles *d_particles;
+        cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
+        cudaMemcpy(d_particles, particles_, sizeof(cuParticles) * PARTICLES_SIZE,
+                   cudaMemcpyHostToDevice);   // fix to keep previous particles
 
-        // plot the particles
+        
+        cuParticles *d_trans_particles;
+        cudaMalloc((void**)&d_trans_particles,
+                   sizeof(cuParticles) * PARTICLES_SIZE);
+        cuPFPropagation<<<grid_size, block_size>>>(d_trans_particles,
+                                                   d_particles, d_state_);
+
+        
+        cuParticles *x_particles = (cuParticles*)malloc(
+            sizeof(cuParticles) * PARTICLES_SIZE);
+        cudaMemcpy(x_particles, d_trans_particles, sizeof(cuParticles) *
+                   PARTICLES_SIZE, cudaMemcpyDeviceToHost);
+        
         for (int i = 0; i < PARTICLES_SIZE; i++) {
-            cv::Point2f center = cv::Point2f(particles[i].x, particles[i].y);
+            cv::Point2f center = cv::Point2f(x_particles[i].x,
+                                             x_particles[i].y);
             cv::circle(image, center, 3, cv::Scalar(0, 255, 255), CV_FILLED);
         }
     }
-
+    
+    for (int i = 0; i < PARTICLES_SIZE; i++) {
+        cv::Point2f center = cv::Point2f(particles_[i].x,
+                                         particles_[i].y);
+        cv::circle(image, center, 3, cv::Scalar(255, 0, 255), CV_FILLED);
+    }
+        
     /* normalize check */
-    float weights[PARTICLES_SIZE] = {0.1, 0.2, 0.3, 0.4, 0.5};
+    /*
+    float weights[PARTICLES_SIZE] = {0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5,
+                                     0.1, 0.2, 0.3, 0.4, 0.5
+    };
     float *d_weight;
     cudaMalloc((void**)&d_weight, sizeof(float) * PARTICLES_SIZE);
     cudaMemcpy(d_weight, weights, sizeof(float) * PARTICLES_SIZE,
                cudaMemcpyHostToDevice);
-    
-    cuPFNormalizeWeights<<<grid_size, block_size>>>(d_weight);
 
+    // cuPFNormalizeWeights<<<grid_size, block_size>>>(d_weight);
+    // cuPFCumulativeSum<<<grid_size, block_size>>>(d_weight);
+
+    
     float *nweights = (float*)malloc(sizeof(float) * PARTICLES_SIZE);
     cudaMemcpy(nweights, d_weight, sizeof(float) * PARTICLES_SIZE,
                cudaMemcpyDeviceToHost);
-
     float sum = 0.0;
     for (int i = 0; i < PARTICLES_SIZE; i++) {
         std::cout << nweights[i]  << ", ";
@@ -370,325 +500,6 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventDestroy(d_stop);
     
     free(box_corners);
-    free(particles);
-    cudaFree(d_state);
+    // free(particles);
+    // cudaFree(d_state_);
 }
-
-
-
-/**
- * 
- */
-
-__global__
-void hello(char *a, int *b) {
-    a[threadIdx.x] += b[threadIdx.x];
-
-}
-
-void test_cuda(char* a, int* b) {
-
-    char *ad;
-    int *bd;
-    const int csize = N*sizeof(char);
-    const int isize = N*sizeof(int);
-
-    printf("%s", a);
-
-    cudaMalloc((void**)&ad, csize);
-    cudaMalloc((void**)&bd, isize);
-    cudaMemcpy(ad, a, csize, cudaMemcpyHostToDevice);
-    cudaMemcpy(bd, b, isize, cudaMemcpyHostToDevice);
-
-    dim3 dimBlock( BLOCK_SIZE, 1 );
-    dim3 dimGrid( 1, 1 );
-    hello<<<dimGrid, dimBlock>>>(ad, bd);
-    cudaMemcpy(a, ad, csize, cudaMemcpyDeviceToHost);
-    cudaFree(ad);
-    cudaFree(bd);
-}
-
-template<typename T>
-__device__ __forceinline__
-T cuFloor(const T x) {
-    return static_cast<T>(std::floor(x));
-}
-
-__global__
-void boxFilterGPU(int *pixels, const int fsize) {
-    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
-    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
-
-    int val = 0;
-    int icounter = 0;
-    if ((t_idx > fsize && t_idx < 640 - fsize) &&
-        (t_idy > fsize && t_idy < 480 - fsize)) {
-        for (int i = -fsize; i < fsize + 1; i++) {
-            for (int j = -fsize; j < fsize + 1; j++) {
-                int idx = (t_idx + j) + (t_idy + i) * blockDim.x * gridDim.x;
-                val += pixels[idx];
-                icounter++;
-            }
-        }
-        pixels[offset] = val/icounter;
-    }
-}
-
-void boxFilter(cv::Mat &image, const int size) {
-    // cv::cvtColor(image, image, CV_BGR2GRAY);
-    int lenght = static_cast<int>(image.rows * image.cols) * sizeof(int);
-    int *pixels = (int*)malloc(lenght);
-
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(8) collapse(2) shared(pixels)
-#endif
-    for (int i = 0; i < image.rows; i++) {
-        for (int j = 0; j < image.cols; j++) {
-            int index = j + (i * image.cols);
-            pixels[index] = (int)image.at<uchar>(i, j);
-        }
-    }
-    
-    cudaEvent_t d_start;
-    cudaEvent_t d_stop;
-    cudaEventCreate(&d_start); 
-    cudaEventCreate(&d_stop);
-    cudaEventRecord(d_start, 0);
-    
-    int *d_pixels;
-    cudaMalloc((void**)&d_pixels, lenght);
-    cudaMemcpy(d_pixels, pixels, lenght, cudaMemcpyHostToDevice);
-    
-    dim3 dim_thread(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 dim_block(static_cast<int>(image.cols)/dim_thread.x,
-                   static_cast<int>(image.rows)/dim_thread.y);
-
-    int b_start = static_cast<int>((float)size/2.0f);
-
-    std::cout << "val: " << b_start  << "\n";
-    
-    boxFilterGPU<<<dim_block, dim_thread>>>(d_pixels, b_start);
-
-    int *download_pixels = (int*)malloc(lenght);
-    cudaMemcpy(download_pixels, d_pixels, lenght, cudaMemcpyDeviceToHost);
-
-    cudaEventRecord(d_stop, 0);
-    cudaEventSynchronize(d_stop);
-    float elapsed_time;
-    cudaEventElapsedTime(&elapsed_time, d_start, d_stop);
-
-    std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
-              << "\n";
-    
-    int stride = image.cols;
-    int j = 0;
-    int k = 0;
-    for (int i = 0; i < image.cols * image.rows; i++) {
-        if (i == stride) {
-            j++;
-            k = 0;
-            stride += image.cols;
-        }
-        image.at<uchar>(j, k++) = download_pixels[i];
-    }
-    
-    cudaFree(d_pixels);
-    free(pixels);
-    cudaEventDestroy(d_start);
-    cudaEventDestroy(d_stop);
-}
-
-
-/*******************************************************
- **using defined struct
-******************************************************/
-
-
-
-__global__
-void boxFilterManGPU(cuImage* d_pixels, const int fsize) {
-    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
-    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
-
-    int val[3];
-    val[0] = val[1] = val[2] = 0;
-    int icounter = 0;
-    if ((t_idx > fsize && t_idx < 640 - fsize) &&
-        (t_idy > fsize && t_idy < 480 - fsize)) {
-        for (int i = -fsize; i < fsize + 1; i++) {
-            for (int j = -fsize; j < fsize + 1; j++) {
-                int idx = (t_idx + j) + (t_idy + i) * blockDim.x * gridDim.x;
-                val[0] += d_pixels[idx].pixel[0];
-                val[1] += d_pixels[idx].pixel[1];
-                val[2] += d_pixels[idx].pixel[2];
-                icounter++;
-            }
-        }
-        d_pixels[offset].pixel[0] = val[0]/icounter;
-        d_pixels[offset].pixel[1] = val[1]/icounter;
-        d_pixels[offset].pixel[2] = val[2]/icounter;
-    }
-}
-
-__host__
-void boxFilterMan(cv::Mat &image, const int fsize) {
-    const int SIZE = static_cast<int>(image.rows * image.cols) *
-        sizeof(cuImage);
-    cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(8) collapse(2) shared(pixels)
-#endif
-    for (int j = 0; j < image.rows; j++) {
-        for (int i = 0; i < image.cols; i++) {
-            int index = i + (j * image.cols);
-            for (int k = 0; k < 3; k++) {
-                pixels[index].pixel[k] = static_cast<unsigned char>(
-                    image.at<cv::Vec3b>(j, i)[k]);
-            }
-        }
-    }
-
-    cudaEvent_t d_start;
-    cudaEvent_t d_stop;
-    cudaEventCreate(&d_start); 
-    cudaEventCreate(&d_stop);
-    cudaEventRecord(d_start, 0);
-    
-    cuImage *d_pixels;
-    cudaMalloc((void**)&d_pixels, SIZE);
-    cudaMemcpy(d_pixels, pixels, SIZE, cudaMemcpyHostToDevice);
-
-    dim3 dim_thread(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 dim_block(static_cast<int>(image.cols)/dim_thread.x,
-                   static_cast<int>(image.rows)/dim_thread.y);
-    boxFilterManGPU<<<dim_block, dim_thread>>>(d_pixels, fsize);
-
-    cuImage *download_pixels = (cuImage*)malloc(SIZE);
-    cudaMemcpy(download_pixels, d_pixels, SIZE, cudaMemcpyDeviceToHost);
-
-    cudaEventRecord(d_stop, 0);
-    cudaEventSynchronize(d_stop);
-    float elapsed_time;
-    cudaEventElapsedTime(&elapsed_time, d_start, d_stop);
-
-    std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
-              << "\n";
-    
-    int stride = image.cols;
-    int j = 0;
-    int k = 0;
-    for (int i = 0; i < image.cols * image.rows; i++) {
-        if (i == stride) {
-            j++;
-            k = 0;
-            stride += image.cols;
-        }
-        image.at<cv::Vec3b>(j, k)[0] = download_pixels[i].pixel[0];
-        image.at<cv::Vec3b>(j, k)[1] = download_pixels[i].pixel[1];
-        image.at<cv::Vec3b>(j, k)[2] = download_pixels[i].pixel[2];
-        k++;
-    }
-    
-    cudaFree(d_pixels);
-    free(pixels);
-    free(download_pixels);
-    cudaEventDestroy(d_start);
-    cudaEventDestroy(d_stop);
-}
-
-
-
-/*******************************************************
-using built in
- *******************************************************/
-
-__global__
-void boxFilter2DGPU(cudaPitchedPtr d_pitched_ptr, int COLS, int ROWS, int D) {
-    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
-
-    char* d_ptr = static_cast<char*>(d_pitched_ptr.ptr);
-    size_t pitch = d_pitched_ptr.pitch;
-    size_t slice_pitch = pitch * ROWS;
-    
-    int* element  = (int*)(d_ptr + t_idy * pitch) + t_idx;
-    element[0] = 255;
-    // element[1] = 0;
-    // element[2] = 255;
-    
-    // for (int i = 0; i < D; i++) {
-    //     char* slice = d_ptr + i * slice_pitch;
-    //     float* row = (float*)(slice + t_idy * 1);
-    //     row[t_idx] = 255;
-    // }
-}
-
-__host__
-void boxFilter2D(cv::Mat &image, const int fsize) {
-    const int ROWS = static_cast<int>(image.rows);
-    const int COLS = static_cast<int>(image.cols);
-    const int DEPTH = 3;
-    int pixels[COLS][ROWS][DEPTH];
-    
-    for (int j = 0; j < ROWS; j++) {
-        for (int i = 0; i < COLS; i++) {
-            for (int k = 0; k < DEPTH; k++) {
-                // pixels[i][j][k] = static_cast<int>(
-                //     image.at<cv::Vec3b>(j, i)[k]);
-                pixels[i][j][k] = 0;
-            }
-        }
-    }
-    cudaExtent extent = make_cudaExtent(COLS * sizeof(int), ROWS, DEPTH);
-    cudaPitchedPtr d_pitched_ptr;
-    cudaMalloc3D(&d_pitched_ptr, extent);
-    
-    cudaMemcpy3DParms d_parms = {0};
-    d_parms.srcPtr.ptr = pixels;
-    d_parms.srcPtr.pitch = COLS * sizeof(int);
-    d_parms.srcPtr.xsize = COLS;
-    d_parms.srcPtr.ysize = ROWS;
-    
-    d_parms.dstPtr.ptr = d_pitched_ptr.ptr;
-    d_parms.dstPtr.pitch = d_pitched_ptr.pitch;
-    d_parms.dstPtr.xsize = COLS;
-    d_parms.dstPtr.ysize = ROWS;
-
-    d_parms.extent.width = COLS * sizeof(int);
-    d_parms.extent.height = ROWS;
-    d_parms.extent.depth = DEPTH;
-    d_parms.kind = cudaMemcpyHostToDevice;
-    
-    cudaMemcpy3D(&d_parms);
-    
-    dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 grid_size(cuDivUp(COLS, BLOCK_SIZE), cuDivUp(ROWS, BLOCK_SIZE));
-
-    // std::cout << "PITCH: " << d_pitched_ptr.pitch  << "\n";
-    
-    boxFilter2DGPU<<<grid_size, block_size>>>(
-        d_pitched_ptr, COLS, ROWS, DEPTH);
-
-    int download_pixels[COLS][ROWS][DEPTH];
-    d_parms.srcPtr.ptr = d_pitched_ptr.ptr;
-    d_parms.srcPtr.pitch = d_pitched_ptr.pitch;
-    d_parms.dstPtr.ptr = download_pixels;
-    d_parms.dstPtr.pitch = COLS * sizeof(int);
-    d_parms.kind = cudaMemcpyDeviceToHost;
-
-    cudaMemcpy3D(&d_parms);
-
-    for (int j = 0; j < ROWS; j++) {
-        for (int i = 0; i < COLS; i++) {
-            for (int k = 0; k < DEPTH; k++) {
-                image.at<cv::Vec3b>(j, i)[k] = download_pixels[i][j][k];
-
-                // std::cout << download_pixels[i][j][k]  << " ";
-            }
-            // std::cout << "\n";
-        }
-    }
-}
-
