@@ -16,6 +16,13 @@ void cudaAssert(cudaError_t code, char *file, int line, bool abort=true) {
     }
 }
 
+typedef struct __align__(16) {
+    int width;
+    int height;
+    int stride;
+    float *elements;
+} cuMat;
+
 __host__ __device__
 struct cuParticles{
     float x;
@@ -29,11 +36,83 @@ struct cuImage{
     unsigned char pixel[3];
 };
 
+/**
+ * Cuda Shared memory operations
+ */
+__device__
+float getElement(const cuMat A, int row, int col) {
+    return A.elements[row * A.stride + col];
+}
+
+__device__
+void setElement(cuMat A, int row, int col, float value) {
+    A.elements[row + A.stride + col] = value;
+}
+
+__device__
+cuMat getSubMatrix(cuMat A, int row, int col) {
+    cuMat a_sub;
+    a_sub.width = BLOCK_SIZE;
+    a_sub.height = BLOCK_SIZE;
+    a_sub.stride = A.stride;
+    a_sub.elements = &A.elements[A.stride * BLOCK_SIZE * row
+                                 + BLOCK_SIZE * col];
+    return a_sub;
+}
+
+__device__
+cuMat cuMatrixProduct(cuMat A, cuMat B, cuMat c) {
+    int block_row = blockIdx.y;
+    int block_col = blockIdx.x;
+    cuMat c_sub = getSubMatrix(c, block_row, block_col);
+    float c_value = 0.0f;
+
+    int row = threadIdx.y;
+    int col = threadIdx.x;
+
+    for (int i = 0; i < (A.width / BLOCK_SIZE); i++) {
+        cuMat a_sub = getSubMatrix(A, block_row, i);
+        cuMat b_sub = getSubMatrix(B, i, block_col);
+
+        __shared__ float as[BLOCK_SIZE][BLOCK_SIZE];
+        __shared__ float bs[BLOCK_SIZE][BLOCK_SIZE];
+
+        as[row][col] = getElement(a_sub, row, col);
+        bs[row][col] = getElement(b_sub, row, col);
+        __syncthreads();
+
+        for (int j = 0; j < BLOCK_SIZE; j++) {
+            c_value += as[row][j] * bs[j][col];
+            __syncthreads();
+        }
+        setElement(c_sub, row, col, c_value);
+    }
+}
+
+/**
+ * Tracking
+ */
+
 __device__ __constant__
 float cu_dynamics[STATE_SIZE][STATE_SIZE] = {{1, 0, 1, 0},
-                                           {0, 1, 0, 1},
-                                           {0, 0, 1, 0},
-                                           {0, 0, 0, 1}};    
+                                             {0, 1, 0, 1},
+                                             {0, 0, 1, 0},
+                                             {0, 0, 0, 1}};    
+
+__device__
+cuMat getPFDynamics() {
+    cuMat dynamics;
+    dynamics.width = STATE_SIZE;
+    dynamics.height = STATE_SIZE;
+    dynamics.stride = STATE_SIZE;
+    float cu_dyna[STATE_SIZE * STATE_SIZE] = {1, 0, 1, 0,
+                                              0, 1, 0, 1,
+                                              0, 0, 1, 0,
+                                              0, 0, 0, 1};
+    dynamics.elements = cu_dyna;
+    return dynamics;
+}
+
 
 __global__
 void curandInit(
@@ -53,12 +132,23 @@ float cuGenerateUniform(
     return rnd_num;
 }
 
+__device__ __forceinline__
+float cuGenerateGaussian(
+    curandState_t *global_state, int idx) {
+    curandState_t local_state = global_state[idx];
+    float rnd_num = curand_normal(&local_state);
+    global_state[idx] = local_state;
+    return rnd_num;
+}
+
 __global__ __forceinline__
 void cuPFInitalizeParticles(
     cuParticles *particles, curandState_t *global_state, float *box_corners) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    // printf(" BLOCK: %d\n", blockDim.x);
     
     // int offset = t_idx;
     if (offset < PARTICLES_SIZE) {
@@ -110,7 +200,99 @@ void cuInitParticles(
         d_particles, d_state, d_corners);
     dim = PARTICLES_SIZE * sizeof(cuParticles);
     cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
+
+    cudaFree(d_corners);
+    cudaFree(d_particles);
+    
 }
+
+// __device__
+__global__
+void cuPFNormalizeWeights(float *weights) {
+    __shared__ float cache[PARTICLES_SIZE];
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int cache_index = threadIdx.x;
+    float temp = 0.0f;
+
+    printf("START: %d\n", t_idx);
+    
+    while (t_idx < PARTICLES_SIZE) {
+        temp += weights[t_idx];
+        t_idx += blockDim.x * gridDim.x;
+    }
+    cache[cache_index] = temp;
+    __syncthreads();
+
+    // printf("Temp: %f\n", temp);
+    
+    int i = blockDim.x/2;
+    while (i != 0) {
+        if (cache_index < i) {
+            cache[cache_index] += cache[cache_index + i];
+        }
+        __syncthreads();
+        i /= 2;
+    }
+    float sum = 0.0f;
+    if (cache_index == 0) {
+        sum = cache[0];
+    }
+    __syncthreads();
+
+    t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    if (offset < PARTICLES_SIZE && sum != 0.0f) {
+        weights[offset] /= sum;
+    }
+}
+
+__device__
+void cuPFTransition(cuParticles *particles, curandState_t *global_state) {
+    cuMat dynamics = getPFDynamics(); // move this
+    
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+    if (offset < PARTICLES_SIZE) {
+        cuMat part_mat;
+        part_mat.width = 1;
+        part_mat.height = STATE_SIZE;
+        part_mat.stride = 1;
+        float element[STATE_SIZE] = {particles[offset].x,
+                                     particles[offset].y,
+                                     particles[offset].dx,
+                                     particles[offset].dy};
+        part_mat.elements = element;
+        cuMat transition;
+        cuMatrixProduct(dynamics, part_mat, transition);
+
+        cuParticles nxt_particle;
+        nxt_particle.x = transition.elements[0] +
+            cuGenerateGaussian(global_state, offset);
+        nxt_particle.y = transition.elements[1] +
+            cuGenerateGaussian(global_state, offset);
+        nxt_particle.dx = transition.elements[2] +
+            cuGenerateGaussian(global_state, offset);
+        nxt_particle.dy = transition.elements[3] +
+            cuGenerateGaussian(global_state, offset);
+
+        particles[offset] = nxt_particle;
+    }
+}
+
+__global__
+void cuPFTracking(cuParticles *particles) {
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+    if (offset < PARTICLES_SIZE) {
+        cuParticles particle;
+        
+    }
+}
+
 
 void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     const int SIZE = static_cast<int>(image.rows * image.cols) * sizeof(cuImage);
@@ -133,14 +315,19 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     
     dim3 block_size(1, PARTICLES_SIZE);
     dim3 grid_size(1, 1);
-
-    // std::cout << cuDivUp(PARTICLES_SIZE, BLOCK_SIZE)  << "\n";
     
     curandState_t *d_state;
     cuParticles *particles = (cuParticles*)malloc(
         sizeof(cuParticles) * PARTICLES_SIZE);
+
+
+    cudaEvent_t d_start;
+    cudaEvent_t d_stop;
+    cudaEventCreate(&d_start); 
+    cudaEventCreate(&d_stop);
+    cudaEventRecord(d_start, 0);
     
-    if (is_init) {
+    if (!is_init) {
         cuInitParticles(d_state, particles, box_corners, block_size, grid_size);
         // is_init = false;
 
@@ -150,7 +337,41 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
             cv::circle(image, center, 3, cv::Scalar(0, 255, 255), CV_FILLED);
         }
     }
+
+    /* normalize check */
+    float weights[PARTICLES_SIZE] = {0.1, 0.2, 0.3, 0.4, 0.5};
+    float *d_weight;
+    cudaMalloc((void**)&d_weight, sizeof(float) * PARTICLES_SIZE);
+    cudaMemcpy(d_weight, weights, sizeof(float) * PARTICLES_SIZE,
+               cudaMemcpyHostToDevice);
     
+    cuPFNormalizeWeights<<<grid_size, block_size>>>(d_weight);
+
+    float *nweights = (float*)malloc(sizeof(float) * PARTICLES_SIZE);
+    cudaMemcpy(nweights, d_weight, sizeof(float) * PARTICLES_SIZE,
+               cudaMemcpyDeviceToHost);
+
+    float sum = 0.0;
+    for (int i = 0; i < PARTICLES_SIZE; i++) {
+        std::cout << nweights[i]  << ", ";
+        sum += nweights[i];
+    }
+    std::cout  << "\n Sum: " << sum << "\n";
+    /*-----------------*/
+
+    cudaEventRecord(d_stop, 0);
+    cudaEventSynchronize(d_stop);
+    float elapsed_time;
+    cudaEventElapsedTime(&elapsed_time, d_start, d_stop);
+    std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
+              << "\n";
+
+    cudaEventDestroy(d_start);
+    cudaEventDestroy(d_stop);
+    
+    free(box_corners);
+    free(particles);
+    cudaFree(d_state);
 }
 
 

@@ -81,6 +81,8 @@ void ParticleFilterGPU::imageCB(
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
     */
+    
+    
     cv_bridge::CvImagePtr pub_msg(new cv_bridge::CvImage);
     pub_msg->header = image_msg->header;
     pub_msg->encoding = sensor_msgs::image_encodings::BGR8;

@@ -11,8 +11,9 @@
 #include <opencv2/opencv.hpp>
 
 const int N = 16;
-const int BLOCK_SIZE = 16;
-#define PARTICLES_SIZE 50
+
+#define BLOCK_SIZE 16
+#define PARTICLES_SIZE 5
 #define STATE_SIZE 4
 
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
