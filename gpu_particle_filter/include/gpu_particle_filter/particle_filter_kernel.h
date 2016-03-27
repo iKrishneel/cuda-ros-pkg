@@ -9,6 +9,7 @@
 #include <curand_kernel.h>
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/cudaimgproc.hpp>
 
 const int N = 16;
 

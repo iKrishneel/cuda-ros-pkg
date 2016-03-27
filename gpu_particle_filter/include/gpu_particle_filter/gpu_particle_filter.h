@@ -14,6 +14,10 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/opencv.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudawarping.hpp>
+
 #include <boost/thread/mutex.hpp>
 
 #include <geometry_msgs/PolygonStamped.h>
@@ -83,8 +87,9 @@ class ParticleFilterGPU: public ParticleFilter,
     std::vector<double> colorHistogramLikelihood(
         std::vector<cv::Mat> &);
     void roiCondition(cv::Rect &, cv::Size);
-    
-    void boxFilterCPU(cv::Mat &, const int);
+
+    void multiResolutionColorContrast(
+        cv::Mat &, const cv::Mat &, const int);
 };
 
 #endif  // _GPU_PARTICLE_FILTER_H_

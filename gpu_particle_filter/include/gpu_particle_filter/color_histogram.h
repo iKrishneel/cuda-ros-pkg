@@ -5,9 +5,8 @@
 #define _COLOR_HISTOGRAM_H_
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/cudaimgproc.hpp>
 #include <omp.h>
-
-#include <vector>
 
 class ColorHistogram {
  private:

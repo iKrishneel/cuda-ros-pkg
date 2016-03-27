@@ -4,7 +4,7 @@
 #include <gpu_particle_filter/gpu_particle_filter.h>
 
 ParticleFilterGPU::ParticleFilterGPU():
-    block_size_(8), hbins(10), sbins(12), downsize_(2),
+    block_size_(8), hbins(10), sbins(12), downsize_(1),
     tracker_init_(false), threads_(8) {
 
     gpu_init_ = true;
@@ -63,26 +63,82 @@ void ParticleFilterGPU::imageCB(
         cv::resize(image, image, cv::Size(image.cols/this->downsize_,
                                           image.rows/this->downsize_));
     }
-
+    /*
     if (tracker_init_) {
         particleFilterGPU(image, screen_rect_, gpu_init_);
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
-    
-    /*
+    */
     if (this->tracker_init_) {
         ROS_INFO("Initializing Tracker");
         this->initializeTracker(image, this->screen_rect_);
         this->tracker_init_ = false;
         ROS_INFO("Tracker Initialization Complete");
+
+        this->prev_frame_ = image(screen_rect_).clone();
+        // cv::resize(prev_frame_, prev_frame_,
+        //        cv::Size(prev_frame_.cols/2, prev_frame_.rows/2));
+        
     }
+    /*
     if (this->screen_rect_.width > this->block_size_) {
         this->runObjectTracker(&image, this->screen_rect_);
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
     */
+
+    /*
+    if (!prev_frame_.empty()) {
+        multiResolutionColorContrast(image, prev_frame_, 3);
+        cv::namedWindow("Template", cv::WINDOW_NORMAL);
+        cv::imshow("Template", prev_frame_);
+    }
+    */
+    
+    if (!prev_frame_.empty()) {
+        std::clock_t start;
+        double duration;
+        start = std::clock();
+        
+        int py_side = 3;
+        cv::Size default_size = image.size();
+        int scale = 2;
+        cv::cuda::GpuMat d_results;
+        cv::Size result_size;
+        do {
+
+            std::cout << "Scale: " << py_side  << "\n";
+            
+            cv::cuda::GpuMat d_templ(prev_frame_);
+            cv::cuda::GpuMat d_image(image);
+            cv::cuda::GpuMat d_result;
+            cv::Ptr<cv::cuda::TemplateMatching> match =
+                cv::cuda::createTemplateMatching(image.type(),
+                                                 CV_TM_CCOEFF_NORMED);
+            match->match(d_image, d_templ, d_result);
+            cv::cuda::normalize(d_result, d_result, 0, 1, cv::NORM_MINMAX, -1);
+            if (py_side < 3) {
+                cv::cuda::resize(d_result, d_result, result_size);
+                cv::cuda::multiply(d_results, d_result, d_results);
+            } else {
+                d_results = d_result;
+                result_size = d_result.size();
+            }
+        } while (py_side-- != 0);
+
+        cv::Mat results;
+        d_results.download(results);
+
+        duration = ( std::clock() - start ) / (double) CLOCKS_PER_SEC;
+        std::cout<<"printf: "<< duration <<'\n';
+        
+        cv::namedWindow("Results", cv::WINDOW_NORMAL);
+        cv::imshow("Results", results);
+        
+    }
+    
     
     
     cv_bridge::CvImagePtr pub_msg(new cv_bridge::CvImage);
@@ -199,21 +255,15 @@ std::vector<cv::Mat> ParticleFilterGPU::particleHistogram(
                                   block_size_);
        roiCondition(p_rect, image.size());
        cv::Mat roi = image(p_rect).clone();
-       cv::Mat h_D;
+       cv::Mat h_D;       
+
        this->computeHistogram(roi, h_D, true);  // color histogram
        h_D = h_D.reshape(1,1);
-       // cv::Mat hog = this->computeHOG(roi);
-      
-       col_hist[i] = h_D;
-       //hog_hist[i] = hog;
+       col_hist[i] = h_D;       
     }
-    
     std::vector<cv::Mat> obj_histogram;
     for (i = 0; i < NUM_PARTICLES; i++) {
-      // cv::Mat features;
-      // cv::hconcat(col_hist[i], hog_hist[i], features);
       obj_histogram.push_back(col_hist[i]);
-      // obj_histogram.push_back(features);
     }
     return obj_histogram;
 }
@@ -263,6 +313,100 @@ void ParticleFilterGPU::roiCondition(
         rect.x -= ((rect.width + rect.x) - imageSize.width);
         rect.width = block_size_;
     }
+}
+
+
+float l2Distance(cv::Vec3b a, cv::Vec3b b) {
+    float i = (static_cast<float>(a[0]) - static_cast<float>(b[0]));
+    float j = (static_cast<float>(a[1]) - static_cast<float>(b[1]));
+    float k = (static_cast<float>(a[2]) - static_cast<float>(b[2]));
+
+    // float sum = abs(i) + abs(j) + abs(k);
+    // float sum = 255.0f;
+    // i /= 100.0f;
+    // j = (j + 127)/255.0f;
+    // k = (j + 127)/ 255.0f;
+    
+    float dist = (i * i) + (j * j) + (k * k);
+    if (isnan(dist)) {
+        return 0.0;
+    }
+    return sqrt(dist);
+}
+
+void ParticleFilterGPU::multiResolutionColorContrast(
+    cv::Mat &image, const cv::Mat &prev_frame, const int p_layers) {
+    if (image.empty() || prev_frame.empty() || p_layers < 1) {
+        ROS_ERROR("ERROR CANNOT COMPUTER COLOR RESOLTION");
+        return;
+    }
+
+    ROS_INFO("CONSTRACT");
+    
+    cv::Size default_size = image.size();
+    cv::Mat prev_image = prev_frame.clone();
+    cv::cvtColor(image, image, CV_RGB2Lab);
+    cv::cvtColor(prev_image, prev_image, CV_RGB2Lab);
+    // cv::resize(image, image, cv::Size(image.cols/2, image.rows/2));
+        
+    int size = 0;
+
+    int padding = 3;
+    
+    cv::Mat prob = cv::Mat::zeros(image.size(), CV_32FC1);
+    do {
+#pragma omp parallel for num_threads(8) collapse(2)
+        for (int i = padding; i < image.rows - padding; i++) {
+            for (int j = padding; j < image.cols - padding; j++) {
+                cv::Vec3b pixel = image.at<cv::Vec3b>(i, j);
+                float distance = 0.0;
+                int icounter = 0;
+                /*
+                for (int y = 0; y < prev_image.rows; y++) {
+                    for (int x = 0; x < prev_image.cols; x++) {
+                        cv::Vec3b p_pixel = prev_image.at<cv::Vec3b>(y, x);
+                        distance += l2Distance(pixel, p_pixel);
+                        icounter++;
+                    }
+                }
+                if (icounter == 0) {
+                    distance = 0.0f;
+                } else {
+                    distance /= static_cast<float>(icounter);
+                }
+                prob.at<float>(i, j) += distance;
+               */
+
+                for (int y = -padding; y <= padding ; y++) {
+                    for (int x = -padding; x <= padding; x++) {
+                        cv::Vec3b p_pixel = prev_image.at<cv::Vec3b>(y, x);
+                        distance += l2Distance(pixel, p_pixel);
+                        icounter++;
+                    }
+                }
+                if (icounter == 0) {
+                    distance = 0.0f;
+                } else {
+                    distance /= static_cast<float>(icounter);
+                }
+                prob.at<float>(i, j) += distance;
+            }
+        }
+        cv::pyrDown(image, image, cv::Size(image.cols/2, image.rows/2));
+        cv::pyrDown(prob, prob, cv::Size(prob.cols/2, prob.rows/2));
+        cv::pyrDown(prev_image, prev_image,
+                    cv::Size(prev_image.cols/2, prev_image.rows/2));
+        
+    } while (size++ < p_layers);
+
+
+        // std::cout << prob << "\n";
+    cv::normalize(prob, prob, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
+    
+    cv::resize(image, image, default_size);
+    cv::resize(prob, prob, default_size);
+    cv::namedWindow("prob", cv::WINDOW_NORMAL);
+    cv::imshow("prob", prob);
 }
 
 int main(int argc, char *argv[]) {

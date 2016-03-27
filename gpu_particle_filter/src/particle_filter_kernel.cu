@@ -313,49 +313,29 @@ void cuPFCenterRms(
 __device__ __forceinline__
 void cuPFTransition(cuParticles *prop_particles,
     const cuParticles *particles, curandState_t *global_state) {
-
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
-
-    // cuMat dynamics = getPFDynamics(); // move this    
     
     if (offset < PARTICLES_SIZE) {
-        // cuMat part_mat;
-        // part_mat.width = STATE_SIZE;
-        // part_mat.height = 1;
-        // part_mat.stride = 4;
         float element[STATE_SIZE] = {particles[offset].x,
                                      particles[offset].y,
                                      particles[offset].dx,
                                      particles[offset].dy};
-        // part_mat.elements = element;
-        // cuMat transition;
-        // cuMatrixProduct(part_mat, dynamics, transition);
-
         float transition[STATE_SIZE];
         for (int i = 0; i < STATE_SIZE; i++) {
             float sum = 0.0f;
             for (int j = 0; j < STATE_SIZE; j++) {
                 sum += DYNAMICS[i][j] * element[j];
             }
-            transition[i] = sum;
+            transition[i] = sum + cuGenerateGaussian(global_state, offset);;
         }
-        
-        // printf("%f %f %f\n", transition[0], element[0],
-        // particles[offset].x);
-        
         cuParticles nxt_particle;
-        nxt_particle.x = transition[0] +
-            cuGenerateGaussian(global_state, offset);        
-        nxt_particle.y = transition[1] +
-            cuGenerateGaussian(global_state, offset);
-        nxt_particle.dx = transition[2] +
-            cuGenerateGaussian(global_state, offset);
-        nxt_particle.dy = transition[3] +
-            cuGenerateGaussian(global_state, offset);
+        nxt_particle.x = transition[0];
+        nxt_particle.y = transition[1];
+        nxt_particle.dx = transition[2];
+        nxt_particle.dy = transition[3];
         prop_particles[offset] = nxt_particle;
-        
     }
 }
 
@@ -423,31 +403,33 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     if (is_init) {
         printf("\033[34m INITIALIZING TRACKER \033[0m\n");
         cuInitParticles(particles_, box_corners, block_size, grid_size);
+
+        // compute weight
+        
         is_init = false;
     } else {
         cuParticles *d_particles;
         cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
         cudaMemcpy(d_particles, particles_, sizeof(cuParticles) * PARTICLES_SIZE,
                    cudaMemcpyHostToDevice);   // fix to keep previous particles
-
-        
         cuParticles *d_trans_particles;
         cudaMalloc((void**)&d_trans_particles,
                    sizeof(cuParticles) * PARTICLES_SIZE);
         cuPFPropagation<<<grid_size, block_size>>>(d_trans_particles,
                                                    d_particles, d_state_);
-
-        
         cuParticles *x_particles = (cuParticles*)malloc(
             sizeof(cuParticles) * PARTICLES_SIZE);
         cudaMemcpy(x_particles, d_trans_particles, sizeof(cuParticles) *
                    PARTICLES_SIZE, cudaMemcpyDeviceToHost);
+
+        // compute weight
+        
         
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             cv::Point2f center = cv::Point2f(x_particles[i].x,
                                              x_particles[i].y);
             cv::circle(image, center, 3, cv::Scalar(0, 255, 255), CV_FILLED);
-        }
+        }    
     }
     
     for (int i = 0; i < PARTICLES_SIZE; i++) {
@@ -455,6 +437,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
                                          particles_[i].y);
         cv::circle(image, center, 3, cv::Scalar(255, 0, 255), CV_FILLED);
     }
+    
         
     /* normalize check */
     /*

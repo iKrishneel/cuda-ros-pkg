@@ -13,15 +13,16 @@ void ColorHistogram::computeHistogram(
     cv::Mat &src, cv::Mat &hist, bool isNormalized) {
     cv::Mat hsv;
     cv::cvtColor(src, hsv, CV_BGR2HSV);
-    int histSize[] = {this->h_bins, this->s_bins};
+    int hist_size[] = {this->h_bins, this->s_bins};
     float h_ranges[] = {0, 180};
     float s_ranges[] = {0, 256};
     const float* ranges[] = {h_ranges, s_ranges};
     int channels[] = {0, 1};
-    cv::calcHist(
-       &hsv, 1, channels, cv::Mat(), hist, 2, histSize, ranges, true, false);
+
+    cv::calcHist(&hsv, 1, channels, cv::Mat(),
+                 hist, 2, hist_size, ranges, true, false);
     if (isNormalized) {
-       cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
+        cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
     }
 }
 
