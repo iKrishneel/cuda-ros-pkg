@@ -17,6 +17,7 @@
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
 #include <opencv2/cudawarping.hpp>
+#include <opencv2/cudaobjdetect.hpp>
 
 #include <boost/thread/mutex.hpp>
 
@@ -29,7 +30,9 @@
 #include <gpu_particle_filter/particle_filter.h>
 #include <gpu_particle_filter/particle_filter_kernel.h>
 #include <gpu_particle_filter/color_histogram.h>
+
 #include <omp.h>
+#include <cmath>
 
 class ParticleFilterGPU: public ParticleFilter,
                          public ColorHistogram {
@@ -38,6 +41,8 @@ class ParticleFilterGPU: public ParticleFilter,
     std::vector<cv::Mat> reference_object_histogram_;
     std::vector<cv::Mat> reference_background_histogram_;
 
+    cv::Mat reference_histogram_;
+    
     cv::Rect_<int> screen_rect_;
     bool tracker_init_;
     int width_;
@@ -49,7 +54,7 @@ class ParticleFilterGPU: public ParticleFilter,
     int sbins;
 
     cv::Mat dynamics;
-    std::vector<Particle> particles;
+    std::vector<Particle> particles_;
     cv::RNG random_num_;
     std::vector<cv::Point2f> particle_prev_position;
     cv::Mat prev_frame_;
@@ -88,6 +93,19 @@ class ParticleFilterGPU: public ParticleFilter,
         std::vector<cv::Mat> &);
     void roiCondition(cv::Rect &, cv::Size);
 
+
+    bool createParticlesFeature(
+        cv::Mat &, const cv::Mat &, const std::vector<Particle> &);
+    void getHistogram(
+        cv::Mat &, const cv::Mat &, const int, const int, bool = true);
+    std::vector<double> colorHistogramLikelihood(
+        const std::vector<Particle> &, cv::Mat &,
+        const cv::Mat, const cv::Mat);
+    
+    void intensityCorrelation(
+        cv::Mat &, cv::Mat &, const cv::Mat &);
+    void hogCorrelation(
+        cv::Mat &, cv::Mat &, const cv::Mat &);
     void multiResolutionColorContrast(
         cv::Mat &, const cv::Mat &, const int);
 };
