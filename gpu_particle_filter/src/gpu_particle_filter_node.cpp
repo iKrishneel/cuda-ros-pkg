@@ -8,6 +8,11 @@ ParticleFilterGPU::ParticleFilterGPU():
     tracker_init_(false), threads_(8) {
 
     gpu_init_ = true;
+
+    cv::Size wsize = cv::Size(16, 16);
+    cv::Size bsize = cv::Size(16, 16);
+    cv::Size csize = cv::Size(8, 8);
+    this->hog_ = cv::cuda::HOG::create(wsize, bsize, csize);
     
     this->onInit();
 }
@@ -77,8 +82,8 @@ void ParticleFilterGPU::imageCB(
         ROS_INFO("Tracker Initialization Complete");
 
         this->prev_frame_ = image(screen_rect_).clone();
-        cv::Mat results;
-        this->intensityCorrelation(results, image, this->prev_frame_);
+        // cv::Mat results;
+        // this->intensityCorrelation(results, image, this->prev_frame_);
 
         // cv::resize(prev_frame_, prev_frame_,
         //        cv::Size(prev_frame_.cols/2, prev_frame_.rows/2));
@@ -138,11 +143,10 @@ void ParticleFilterGPU::initializeTracker(
        this->random_num_, rect.x , rect.y,
        rect.x + rect.width, rect.y + rect.height);
     
-    this->createParticlesFeature(this->reference_histogram_, image, particles_);
-
+    this->createParticlesFeature(this->reference_features_, image, particles_);
     cv::namedWindow("Ref", cv::WINDOW_NORMAL);
-    cv::imshow("Ref", reference_histogram_);
-    
+    cv::imshow("Ref", reference_features_.color_hist);
+   
     
     /*
     cv::Mat object_region = image(rect).clone();
@@ -158,22 +162,26 @@ void ParticleFilterGPU::initializeTracker(
            cv::Point2f(this->particles_[i].x, this->particles_[i].y));
     }
     */
+    
     this->prev_frame_ = image.clone();
     this->width_ = rect.width;
     this->height_ = rect.height;
 }
 
 bool ParticleFilterGPU::createParticlesFeature(
-    cv::Mat &histogram, const cv::Mat &img,
+    PFFeatures &features, const cv::Mat &img,
     const std::vector<Particle> &particles) {
     if (img.empty() || particles.empty()) {
         return false;
     }
-    const int dim = 10;
+    cv::Mat histogram;
+    cv::Mat hog_descriptors;
+    
+    const int dim = 8;
     cv::Mat image;
     image = img;
-    cv::cvtColor(img, image, CV_BGR2Lab);
-    const int bin_size = 64;
+    // cv::cvtColor(img, image, CV_BGR2HSV);
+    const int bin_size = 16;
     for (int i = 0; i < particles.size(); i++) {
         cv::Rect_<int> rect = cv::Rect_<int>(particles[i].x - dim/2,
                                              particles[i].y - dim/2,
@@ -185,7 +193,8 @@ bool ParticleFilterGPU::createParticlesFeature(
         this->getHistogram(part_hist, roi, bin_size, 3, false);
 
         cv::Point2i s_pt = cv::Point2i((particles[i].x - dim),
-                                       (particles[i].y - dim));
+                                       (particles[i].y - dim));        
+        
         for (int j = 0; j < 2; j++) {
             for (int k = 0; k < 2; k++) {
                 cv::Rect_<int> s_rect = cv::Rect_<int>(s_pt.x, s_pt.y, dim, dim);
@@ -222,7 +231,20 @@ bool ParticleFilterGPU::createParticlesFeature(
         }
         cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX, -1);
         histogram.push_back(hist);
+
+        // hog feature
+        cv::cuda::GpuMat d_roi(roi);
+        cv::cuda::GpuMat d_desc;
+        cv::cuda::cvtColor(d_roi, d_roi, CV_BGR2GRAY);
+        this->hog_->compute(d_roi, d_desc);
+
+        cv::Mat desc;
+        d_desc.download(desc);
+        hog_descriptors.push_back(desc);
     }
+    
+    features.hog_hist = hog_descriptors;
+    features.color_hist = histogram;
     return true;
 }
 
@@ -274,12 +296,12 @@ void ParticleFilterGPU::runObjectTracker(
     std::vector<double> color_probability = this->colorHistogramLikelihood(
        particle_histogram);
     */
-    cv::Mat histogram;
-    this->createParticlesFeature(histogram, image, x_particle);
+
+    PFFeatures features;
+    this->createParticlesFeature(features, image, x_particle);
     std::vector<double> color_probability = this->colorHistogramLikelihood(
-        x_particle, image, histogram, this->reference_histogram_);
-    
-    
+        x_particle, image, features, this->reference_features_);
+
     std::vector<double> wN;
     for (int i = 0; i < NUM_PARTICLES; i++) {
       double probability = static_cast<double>(
@@ -304,48 +326,83 @@ void ParticleFilterGPU::runObjectTracker(
     cv::imshow("Tracking", image);
 }
 
+template<typename T>
+T ParticleFilterGPU::EuclideanDistance(
+    Particle a, Particle b, bool is_square) {
+    T dist = std::pow((a.x - b.x), 2) + std::pow((a.y - b.y), 2);
+    if (is_square) {
+        dist = std::sqrt(dist);
+    }
+    return dist;
+}
+
 
 std::vector<double> ParticleFilterGPU::colorHistogramLikelihood(
     const std::vector<Particle> &particles, cv::Mat &image,
-    const cv::Mat current_hist, const cv::Mat prev_hist) {
-    if (current_hist.cols != prev_hist.cols || particles.empty()) {
+    const PFFeatures features, const PFFeatures prev_features) {
+    if (features.color_hist.cols != prev_features.color_hist.cols ||
+        particles.empty()) {
         return std::vector<double>();
     }
 
-    cv::Mat results;
-    this->intensityCorrelation(results, image, this->prev_frame_);
-
-    cv::imshow("results", results);
+    // cv::Mat results;
+    // this->intensityCorrelation(results, image, this->prev_frame_);
+    // cv::imshow("results", results);
     
     
-    std::vector<double> probability(static_cast<int>(current_hist.rows));
+    std::vector<double> probability(static_cast<int>(features.color_hist.rows));
     double *p = &probability[0];
-// #ifdef _OPENMP
-// #pragma omp parallel for num_threads(8)
-// #endif
-    for (int i = 0; i < current_hist.rows; i++) {
-        cv::Mat p_hist = current_hist.row(i);
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(8)
+#endif
+    for (int i = 0; i < features.color_hist.rows; i++) {
+        cv::Mat p_color = features.color_hist.row(i);
+        cv::Mat p_hog = features.hog_hist.row(i);
         double c_dist = DBL_MAX;
-        for (int j = 0; j < prev_hist.rows; j++) {
-            cv::Mat hist = prev_hist.row(j);
-            double d = cv::compareHist(hist, p_hist, CV_COMP_BHATTACHARYYA);
-            if (d < c_dist) {
-                c_dist = d;
+        double h_dist = DBL_MAX;
+        int match_idx = -1;
+        
+        for (int j = 0; j < prev_features.color_hist.rows; j++) {
+            // cv::Mat chist = prev_features.color_hist.row(j);
+            // double d_color = cv::compareHist(
+            //     chist, p_color, CV_COMP_BHATTACHARYYA);
+            
+            cv::Mat hhist = prev_features.hog_hist.row(j);
+            double d_hog = cv::compareHist(hhist, p_hog, CV_COMP_BHATTACHARYYA);
+            
+            // if (d_color < c_dist) {
+            //     c_dist = d_color;
+            //     match_idx = j;
+            // }
+            if (d_hog < h_dist) {
+                h_dist = d_hog;
+                match_idx = j;
             }
+            
+            // double pt_dist = this->EuclideanDistance<double>(
+            //     this->particles_[j], particles[i]);
         }
-        double prob = 1 * exp(-0.70 * c_dist);
 
+        // h_dist = cv::compareHist(prev_features.hog_hist.row(match_idx),
+        //                          p_hog, CV_COMP_BHATTACHARYYA);
+        c_dist = cv::compareHist(prev_features.color_hist.row(match_idx),
+                                 p_color, CV_COMP_BHATTACHARYYA);
+        double c_prob = 1 * exp(-0.70 * c_dist);
+        double h_prob = 1 * exp(-0.70 * h_dist);
+        double prob = c_prob * h_prob;
         double val = 0.0;
+
+        /*
         if (particles[i].y >= 0 && particles[i].y < results.rows &&
             particles[i].x >= 0 && particles[i].x < results.cols) {
             val = results.at<float>(particles[i].y, particles[i].x);
+            }*/
+        if (prob < 0.7) {
+            prob = 0.0;
         }
-        // if (prob < 0.5) {
-        //     prob = 0.0;
-        // }
         
-        p[i] = prob * val;
-        std::cout << "Prob: " << p[i] << " " << val << " " << p[i] * val  << "\n";
+        p[i] = prob + val;
+        // std::cout << "Prob: " << p[i] << " " << val << " " << p[i] * val  << "\n";
     }
     return probability;
 }
@@ -438,19 +495,19 @@ void ParticleFilterGPU::roiCondition(
     cv::Rect &rect, cv::Size imageSize) {
     if (rect.x < 0) {
         rect.x = 0;
-        rect.width = block_size_;
+        // rect.width = block_size_;
     }
     if (rect.y < 0) {
         rect.y = 0;
-        rect.height = block_size_;
+        // rect.height = block_size_;
     }
     if ((rect.height + rect.y) > imageSize.height) {
         rect.y -= ((rect.height + rect.y) - imageSize.height);
-        rect.height = block_size_;
+        // rect.height = block_size_;
     }
     if ((rect.width + rect.x) > imageSize.width) {
         rect.x -= ((rect.width + rect.x) - imageSize.width);
-        rect.width = block_size_;
+        // rect.width = block_size_;
     }
 }
 

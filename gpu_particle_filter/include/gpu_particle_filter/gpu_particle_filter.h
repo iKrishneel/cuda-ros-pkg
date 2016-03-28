@@ -37,6 +37,11 @@
 class ParticleFilterGPU: public ParticleFilter,
                          public ColorHistogram {
 
+    struct PFFeatures {
+        cv::Mat color_hist;
+        cv::Mat hog_hist;
+    };
+    
  private:
     std::vector<cv::Mat> reference_object_histogram_;
     std::vector<cv::Mat> reference_background_histogram_;
@@ -60,6 +65,9 @@ class ParticleFilterGPU: public ParticleFilter,
     cv::Mat prev_frame_;
 
     bool gpu_init_;
+
+    cv::Ptr<cv::cuda::HOG> hog_;
+    PFFeatures reference_features_;
     
  protected:
     virtual void onInit();
@@ -95,12 +103,15 @@ class ParticleFilterGPU: public ParticleFilter,
 
 
     bool createParticlesFeature(
-        cv::Mat &, const cv::Mat &, const std::vector<Particle> &);
+        PFFeatures &, const cv::Mat &, const std::vector<Particle> &);
     void getHistogram(
         cv::Mat &, const cv::Mat &, const int, const int, bool = true);
     std::vector<double> colorHistogramLikelihood(
         const std::vector<Particle> &, cv::Mat &,
-        const cv::Mat, const cv::Mat);
+        const PFFeatures, const PFFeatures);
+    template<typename T>
+    T EuclideanDistance(Particle, Particle, bool = true);
+
     
     void intensityCorrelation(
         cv::Mat &, cv::Mat &, const cv::Mat &);
