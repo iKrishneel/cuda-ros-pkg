@@ -4,14 +4,14 @@
 #include <gpu_particle_filter/gpu_particle_filter.h>
 
 ParticleFilterGPU::ParticleFilterGPU():
-    block_size_(8), hbins(10), sbins(12), downsize_(2),
+    block_size_(8), hbins(10), sbins(12), downsize_(1),
     tracker_init_(false), threads_(8) {
 
     gpu_init_ = true;
 
-    cv::Size wsize = cv::Size(16, 16);
-    cv::Size bsize = cv::Size(16, 16);
-    cv::Size csize = cv::Size(8, 8);
+    cv::Size wsize = cv::Size(16/downsize_, 16/downsize_);
+    cv::Size bsize = cv::Size(16/downsize_, 16/downsize_);
+    cv::Size csize = cv::Size(8/downsize_, 8/downsize_);
     this->hog_ = cv::cuda::HOG::create(wsize, bsize, csize);
     
     this->onInit();
@@ -94,14 +94,13 @@ void ParticleFilterGPU::imageCB(
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
-
     /*
     if (!prev_frame_.empty()) {
         multiResolutionColorContrast(image, prev_frame_, 3);
         cv::namedWindow("Template", cv::WINDOW_NORMAL);
         cv::imshow("Template", prev_frame_);
     }
-    */
+    */    
     
     bool run_this = false;
     if (!prev_frame_.empty() && run_this) {
@@ -177,11 +176,15 @@ bool ParticleFilterGPU::createParticlesFeature(
     cv::Mat histogram;
     cv::Mat hog_descriptors;
     
-    const int dim = 8;
+    const int dim = 8/downsize_;
     cv::Mat image;
-    image = img;
-    // cv::cvtColor(img, image, CV_BGR2HSV);
+    image = img.clone();
+    cv::cvtColor(img, image, CV_BGR2HSV);
     const int bin_size = 16;
+
+// #ifdef _OPENMP
+// #pragma omp parallel for num_threads(8)
+// #endif
     for (int i = 0; i < particles.size(); i++) {
         cv::Rect_<int> rect = cv::Rect_<int>(particles[i].x - dim/2,
                                              particles[i].y - dim/2,
@@ -233,6 +236,7 @@ bool ParticleFilterGPU::createParticlesFeature(
         histogram.push_back(hist);
 
         // hog feature
+        roi = img(rect).clone();
         cv::cuda::GpuMat d_roi(roi);
         cv::cuda::GpuMat d_desc;
         cv::cuda::cvtColor(d_roi, d_roi, CV_BGR2GRAY);
@@ -256,6 +260,10 @@ void ParticleFilterGPU::getHistogram(
     }
     histogram = cv::Mat::zeros(sizeof(char), bins * chanel, CV_32F);
     int bin_range = std::ceil(256/bins);
+
+// #ifdef _OPENMP
+// #pragma omp parallel for num_threads(threads_)
+// #endif
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             float pixel = static_cast<float>(image.at<cv::Vec3b>(j, i)[0]);
@@ -290,18 +298,25 @@ void ParticleFilterGPU::runObjectTracker(
     std::vector<Particle> x_particle = this->transition(
        this->particles_, this->dynamics, this->random_num_);
 
-    /*
-    std::vector<cv::Mat> particle_histogram = this->particleHistogram(
-       image, x_particle);
-    std::vector<double> color_probability = this->colorHistogramLikelihood(
-       particle_histogram);
-    */
-
+    std::clock_t start;
+    double duration;
+    start = std::clock();
+    
     PFFeatures features;
     this->createParticlesFeature(features, image, x_particle);
+
+    duration = ( std::clock() - start ) / (double) CLOCKS_PER_SEC;
+    std::cout<<"Feature: "<< duration <<'\t';
+    start = std::clock();
+    
     std::vector<double> color_probability = this->colorHistogramLikelihood(
         x_particle, image, features, this->reference_features_);
 
+    duration = ( std::clock() - start ) / (double) CLOCKS_PER_SEC;
+    std::cout<<"Likelihood: "<< duration <<'\n';
+
+
+    
     std::vector<double> wN;
     for (int i = 0; i < NUM_PARTICLES; i++) {
       double probability = static_cast<double>(
@@ -353,7 +368,7 @@ std::vector<double> ParticleFilterGPU::colorHistogramLikelihood(
     std::vector<double> probability(static_cast<int>(features.color_hist.rows));
     double *p = &probability[0];
 #ifdef _OPENMP
-#pragma omp parallel for num_threads(8)
+#pragma omp parallel for num_threads(threads_)
 #endif
     for (int i = 0; i < features.color_hist.rows; i++) {
         cv::Mat p_color = features.color_hist.row(i);
@@ -366,43 +381,43 @@ std::vector<double> ParticleFilterGPU::colorHistogramLikelihood(
             // cv::Mat chist = prev_features.color_hist.row(j);
             // double d_color = cv::compareHist(
             //     chist, p_color, CV_COMP_BHATTACHARYYA);
-            
-            cv::Mat hhist = prev_features.hog_hist.row(j);
-            double d_hog = cv::compareHist(hhist, p_hog, CV_COMP_BHATTACHARYYA);
-            
             // if (d_color < c_dist) {
             //     c_dist = d_color;
             //     match_idx = j;
             // }
+            
+            cv::Mat hhist = prev_features.hog_hist.row(j);
+            double d_hog = cv::compareHist(hhist, p_hog, CV_COMP_BHATTACHARYYA);
+            double pt_dist = this->EuclideanDistance<double>(
+                this->particles_[j], particles[i]);
             if (d_hog < h_dist) {
                 h_dist = d_hog;
                 match_idx = j;
             }
-            
-            // double pt_dist = this->EuclideanDistance<double>(
-            //     this->particles_[j], particles[i]);
         }
 
-        // h_dist = cv::compareHist(prev_features.hog_hist.row(match_idx),
-        //                          p_hog, CV_COMP_BHATTACHARYYA);
-        c_dist = cv::compareHist(prev_features.color_hist.row(match_idx),
-                                 p_color, CV_COMP_BHATTACHARYYA);
-        double c_prob = 1 * exp(-0.70 * c_dist);
-        double h_prob = 1 * exp(-0.70 * h_dist);
-        double prob = c_prob * h_prob;
-        double val = 0.0;
-
-        /*
-        if (particles[i].y >= 0 && particles[i].y < results.rows &&
-            particles[i].x >= 0 && particles[i].x < results.cols) {
-            val = results.at<float>(particles[i].y, particles[i].x);
-            }*/
-        if (prob < 0.7) {
-            prob = 0.0;
+        double prob = 0.0;
+        if (match_idx != -1) {
+            // h_dist = cv::compareHist(prev_features.hog_hist.row(match_idx),
+            //                          p_hog, CV_COMP_BHATTACHARYYA);
+            c_dist = cv::compareHist(prev_features.color_hist.row(match_idx),
+                                     p_color, CV_COMP_BHATTACHARYYA);
+            double c_prob = 1 * exp(-0.70 * c_dist);
+            double h_prob = 1 * exp(-0.70 * h_dist);
+            prob = c_prob * h_prob;
+            double val = 0.0;
+            if (prob < 0.7) {
+                prob = 0.0;
+            } else if (prob > 0.9) {
+                this->reference_features_.color_hist.row(match_idx) =
+                    features.color_hist.row(i);
+                this->reference_features_.hog_hist.row(match_idx) =
+                    features.hog_hist.row(i);
+            }
+            // std::cout << "Prob: " << p[i] << " " << val << " " << p[i]
+            // * val  << "\n";
         }
-        
-        p[i] = prob + val;
-        // std::cout << "Prob: " << p[i] << " " << val << " " << p[i] * val  << "\n";
+        p[i] = prob;
     }
     return probability;
 }
@@ -707,6 +722,81 @@ void ParticleFilterGPU::multiResolutionColorContrast(
     cv::resize(prob, prob, default_size);
     cv::namedWindow("prob", cv::WINDOW_NORMAL);
     cv::imshow("prob", prob);
+}
+
+
+
+/**
+ * test
+ 
+ */
+void ParticleFilterGPU::superPixel(cv::Mat &image) {
+    if (image.empty()) {
+        return;
+    }
+    cv::Mat temp = image.clone();
+    /*
+    cv::Ptr<cv::ximgproc::SuperpixelSEEDS> seeds;
+    bool is_init = false;
+    int num_superpixels = 800;
+    bool double_step = false;
+    int num_levels = 1;
+    int prior = 2;
+    int num_hist_bins = 10;
+    int num_iter = 10;
+
+    
+    seeds = cv::ximgproc::createSuperpixelSEEDS(
+        image.cols, image.rows, image.channels(), num_superpixels,
+        num_levels, prior, num_hist_bins, double_step);
+
+    cv::Mat c_img;
+    cv::cvtColor(image, c_img, CV_BGR2HSV);
+    seeds->iterate(c_img, num_iter);
+
+    cv::Mat labels;
+    seeds->getLabels(labels);
+
+    cv::Mat mask;
+    seeds->getLabelContourMask(mask, false);
+
+    cv::Mat results = image.clone();
+    results.setTo(cv::Scalar(0, 255, 0), mask);
+
+    // std::cout << labels << "\n";
+
+    cv::namedWindow("results", cv::WINDOW_NORMAL);
+    cv::imshow("results", results);
+    cv::imshow("labels", mask);
+    */
+    
+    // make sift keypoints
+    cv::Ptr<cv::Feature2D> sift = cv::xfeatures2d::SIFT::create(0, 5, 0.05);
+
+    cv::Mat templ_img = cv::imread("/home/krishneel/Desktop/25m.jpg");
+    std::vector<cv::KeyPoint> keypoints_tmp;
+    sift->detect(templ_img, keypoints_tmp);
+    
+    std::vector<cv::KeyPoint> keypoints;
+    sift->detect(temp, keypoints);
+
+    cv::Mat desc_tmp, desc;
+    sift->compute(temp, keypoints, desc);
+    sift->compute(templ_img, keypoints_tmp, desc_tmp);
+
+    cv::BFMatcher matcher;
+    std::vector<cv::DMatch> matches;
+    matcher.match(desc_tmp, desc, matches);
+    
+    cv::Mat img_match;
+    cv::drawMatches(templ_img, keypoints_tmp, temp, keypoints, matches,
+                    img_match, cv::Scalar(0, 255, 0));
+    
+    
+    cv::drawKeypoints(temp, keypoints, temp);
+    cv::namedWindow("sift", cv::WINDOW_NORMAL);
+    cv::imshow("sift", img_match);
+    
 }
 
 int main(int argc, char *argv[]) {

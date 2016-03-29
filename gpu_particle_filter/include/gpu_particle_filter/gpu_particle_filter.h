@@ -14,6 +14,9 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/opencv.hpp>
+#include <opencv2/ximgproc.hpp>
+#include <opencv2/xfeatures2d/nonfree.hpp>
+
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
 #include <opencv2/cudawarping.hpp>
@@ -112,6 +115,7 @@ class ParticleFilterGPU: public ParticleFilter,
     template<typename T>
     T EuclideanDistance(Particle, Particle, bool = true);
 
+    void superPixel(cv::Mat &);
     
     void intensityCorrelation(
         cv::Mat &, cv::Mat &, const cv::Mat &);
