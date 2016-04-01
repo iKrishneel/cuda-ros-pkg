@@ -68,13 +68,14 @@ void ParticleFilterGPU::imageCB(
         cv::resize(image, image, cv::Size(image.cols/this->downsize_,
                                           image.rows/this->downsize_));
     }
-    /*
+    
     if (tracker_init_) {
         particleFilterGPU(image, screen_rect_, gpu_init_);
     } else {
-        ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
+        ROS_ERROR("THE TRACKER IS NOT INITALIZED");
     }
-    */
+    return;
+    
     if (this->tracker_init_) {
         ROS_INFO("Initializing Tracker");
         this->initializeTracker(image, this->screen_rect_);
@@ -142,10 +143,7 @@ void ParticleFilterGPU::initializeTracker(
        this->random_num_, rect.x , rect.y,
        rect.x + rect.width, rect.y + rect.height);
     
-    this->createParticlesFeature(this->reference_features_, image, particles_);
-    cv::namedWindow("Ref", cv::WINDOW_NORMAL);
-    cv::imshow("Ref", reference_features_.color_hist);
-   
+    this->createParticlesFeature(this->reference_features_, image, particles_);   
     
     /*
     cv::Mat object_region = image(rect).clone();
@@ -173,18 +171,22 @@ bool ParticleFilterGPU::createParticlesFeature(
     if (img.empty() || particles.empty()) {
         return false;
     }
-    cv::Mat histogram;
-    cv::Mat hog_descriptors;
-    
+
+    const int LENGHT = static_cast<int>(particles.size());
     const int dim = 8/downsize_;
     cv::Mat image;
     image = img.clone();
     cv::cvtColor(img, image, CV_BGR2HSV);
     const int bin_size = 16;
 
-// #ifdef _OPENMP
-// #pragma omp parallel for num_threads(8)
-// #endif
+    // cv::Mat histogram = cv::Mat(LENGHT, bin_size * 6, CV_32F);
+    cv::Mat histogram[LENGHT];
+    cv::Mat hog_descriptors;
+    cv::Rect_<int> tmp_rect[LENGHT];
+        
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads_)
+#endif
     for (int i = 0; i < particles.size(); i++) {
         cv::Rect_<int> rect = cv::Rect_<int>(particles[i].x - dim/2,
                                              particles[i].y - dim/2,
@@ -233,22 +235,27 @@ bool ParticleFilterGPU::createParticlesFeature(
             hist.at<float>(0, x) += region_hist.at<float>(0, x - part_hist.cols);
         }
         cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX, -1);
-        histogram.push_back(hist);
+        histogram[i] = hist;
+        
+        tmp_rect[i] = rect;
+    }
 
-        // hog feature
-        roi = img(rect).clone();
+    cv::Mat color_hist;
+    for (int i = 0; i < particles.size(); i++) {
+        cv::Mat roi = img(tmp_rect[i]).clone();
         cv::cuda::GpuMat d_roi(roi);
         cv::cuda::GpuMat d_desc;
         cv::cuda::cvtColor(d_roi, d_roi, CV_BGR2GRAY);
         this->hog_->compute(d_roi, d_desc);
-
         cv::Mat desc;
         d_desc.download(desc);
         hog_descriptors.push_back(desc);
+
+        color_hist.push_back(histogram[i]);
     }
     
     features.hog_hist = hog_descriptors;
-    features.color_hist = histogram;
+    features.color_hist = color_hist;
     return true;
 }
 
@@ -261,9 +268,9 @@ void ParticleFilterGPU::getHistogram(
     histogram = cv::Mat::zeros(sizeof(char), bins * chanel, CV_32F);
     int bin_range = std::ceil(256/bins);
 
-// #ifdef _OPENMP
-// #pragma omp parallel for num_threads(threads_)
-// #endif
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads_)
+#endif
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             float pixel = static_cast<float>(image.at<cv::Vec3b>(j, i)[0]);
@@ -367,9 +374,9 @@ std::vector<double> ParticleFilterGPU::colorHistogramLikelihood(
     
     std::vector<double> probability(static_cast<int>(features.color_hist.rows));
     double *p = &probability[0];
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(threads_)
-#endif
+// #ifdef _OPENMP
+// #pragma omp parallel for num_threads(threads_)
+// #endif
     for (int i = 0; i < features.color_hist.rows; i++) {
         cv::Mat p_color = features.color_hist.row(i);
         cv::Mat p_hog = features.hog_hist.row(i);
@@ -413,12 +420,31 @@ std::vector<double> ParticleFilterGPU::colorHistogramLikelihood(
                     features.color_hist.row(i);
                 this->reference_features_.hog_hist.row(match_idx) =
                     features.hog_hist.row(i);
+            } else if (prob > 0.7 && prob < 0.9) {
+                const float adapt = prob;
+                cv::Mat color_ref = reference_features_.color_hist.row(match_idx);
+                cv::Mat hog_ref = reference_features_.hog_hist.row(match_idx);
+                for (int y = 0; y < color_ref.cols; y++) {
+                    color_ref.at<float>(0, y) *= (adapt);
+                    color_ref.at<float>(0, y) += (
+                        (1.0f - adapt) * features.color_hist.row(i).at<float>(0, y));
+                }
+                for (int y = 0; y < hog_ref.cols; y++) {
+                    hog_ref.at<float>(0, y) *= (adapt);
+                    hog_ref.at<float>(0, y) += (
+                        (1.0f- adapt) * features.hog_hist.row(i).at<float>(0, y));
+                }
+                this->reference_features_.color_hist.row(match_idx) = color_ref;
+                this->reference_features_.hog_hist.row(match_idx) = hog_ref;
             }
             // std::cout << "Prob: " << p[i] << " " << val << " " << p[i]
             // * val  << "\n";
         }
         p[i] = prob;
     }
+    cv::namedWindow("Ref", cv::WINDOW_NORMAL);
+    cv::imshow("Ref", reference_features_.color_hist);
+
     return probability;
 }
 

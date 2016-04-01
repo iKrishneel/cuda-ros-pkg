@@ -17,7 +17,7 @@ struct Particle{
 class ParticleFilter {
    
 #define PI 3.14159265358979323846
-#define SIGMA 2.0
+#define SIGMA 10.0
 #define NUM_PARTICLES 500
 #define NUM_STATE 4
    

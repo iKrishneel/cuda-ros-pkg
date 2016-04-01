@@ -384,14 +384,15 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
             }
         }
     }
-
+    
     float *box_corners = (float*)malloc(4 * sizeof(float));
     box_corners[0] = rect.x;
     box_corners[1] = rect.y;
     box_corners[2] = rect.x + rect.width;
     box_corners[3] = rect.y + rect.height;
     
-    dim3 block_size(1, PARTICLES_SIZE);
+    // dim3 block_size(1, PARTICLES_SIZE);
+    dim3 block_size(PARTICLES_SIZE, 1);
     dim3 grid_size(1, 1);
 
     cudaEvent_t d_start;
@@ -438,7 +439,6 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cv::circle(image, center, 3, cv::Scalar(255, 0, 255), CV_FILLED);
     }
     
-        
     /* normalize check */
     /*
     float weights[PARTICLES_SIZE] = {0.1, 0.2, 0.3, 0.4, 0.5,
@@ -479,6 +479,11 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
               << "\n";
 
+
+    cv::namedWindow("particels", cv::WINDOW_NORMAL);
+    cv::imshow("particels", image);
+    cv::waitKey(3);
+    
     cudaEventDestroy(d_start);
     cudaEventDestroy(d_stop);
     
