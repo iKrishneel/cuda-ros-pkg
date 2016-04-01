@@ -11,11 +11,14 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/cudaimgproc.hpp>
 
+#include <gpu_particle_filter/color_histogram_kernel.h>
+
 const int N = 16;
 
 #define BLOCK_SIZE 16
 #define PARTICLES_SIZE 500
 #define STATE_SIZE 4
+#define SIGMA 5
 
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
 

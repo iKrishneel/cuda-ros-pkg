@@ -65,7 +65,7 @@ std::vector<Particle> ParticleFilter::transition(
         t.x = static_cast<double>(trans.at<double>(0, 0)) +
            static_cast<double>(rng.gaussian(SIGMA));
         t.y = static_cast<double>(trans.at<double>(1, 0)) +
-           static_cast<double>(rng.gaussian(SIGMA));
+            static_cast<double>(rng.gaussian(SIGMA));
         t.dx = static_cast<double>(trans.at<double>(2, 0)) +
            static_cast<double>(rng.gaussian(SIGMA));
         t.dy = static_cast<double>(trans.at<double>(3, 0)) +

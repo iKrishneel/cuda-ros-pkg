@@ -47,6 +47,8 @@ void ParticleFilterGPU::screenPtCB(
     } else {
         ROS_WARN("-- Selected Object Size is too small... Not init tracker");
     }
+
+    gpu_init_ = true;
 }
 
 void ParticleFilterGPU::imageCB(
@@ -68,13 +70,14 @@ void ParticleFilterGPU::imageCB(
         cv::resize(image, image, cv::Size(image.cols/this->downsize_,
                                           image.rows/this->downsize_));
     }
-    
+
     if (tracker_init_) {
         particleFilterGPU(image, screen_rect_, gpu_init_);
     } else {
         ROS_ERROR("THE TRACKER IS NOT INITALIZED");
     }
     return;
+
     
     if (this->tracker_init_) {
         ROS_INFO("Initializing Tracker");
@@ -90,11 +93,13 @@ void ParticleFilterGPU::imageCB(
         //        cv::Size(prev_frame_.cols/2, prev_frame_.rows/2));
         
     }
+    /*
     if (this->screen_rect_.width > this->block_size_) {
         this->runObjectTracker(&image, this->screen_rect_);
     } else {
         ROS_ERROR_ONCE("THE TRACKER IS NOT INITALIZED");
     }
+   
     /*
     if (!prev_frame_.empty()) {
         multiResolutionColorContrast(image, prev_frame_, 3);
@@ -305,6 +310,13 @@ void ParticleFilterGPU::runObjectTracker(
     std::vector<Particle> x_particle = this->transition(
        this->particles_, this->dynamics, this->random_num_);
 
+    /*
+    this->printParticles(image, x_particle);
+    cv::namedWindow("Tracking", cv::WINDOW_NORMAL);
+    cv::imshow("Tracking", image);
+    return;
+    */
+    
     std::clock_t start;
     double duration;
     start = std::clock();

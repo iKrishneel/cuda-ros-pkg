@@ -191,7 +191,8 @@ int cuDivUp(int a, int b) {
     return ((a % b) != 0) ? (a / b + 1) : (a / b);
 }
 
-__device__ __forceinline__
+// __device__ __forceinline__
+__global__
 void cuPFNormalizeWeights(float *weights) {
     __shared__ float cache[PARTICLES_SIZE];
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -229,7 +230,8 @@ void cuPFNormalizeWeights(float *weights) {
     }
 }
 
-__device__ __forceinline__
+// __device__ __forceinline__
+__global__
 void cuPFCumulativeSum(float *weights) {
     __shared__ float weight_cache[PARTICLES_SIZE];
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -254,21 +256,26 @@ void cuPFCumulativeSum(float *weights) {
     }
 }
 
-__device__ __forceinline__
+// __device__ __forceinline__
+__global__
 void cuPFSequentialResample(
-    cuParticles *particles, cuParticles *prop_particles, float *weights) {
-    cuPFNormalizeWeights(weights);
+    cuParticles *particles, cuParticles *prop_particles,
+    float *weights, curandState_t *global_state) {
+
     __shared__ cuParticles cache[PARTICLES_SIZE];
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
     if (offset < PARTICLES_SIZE) {
         cache[offset] = particles[offset];
     }
     __syncthreads();
 
     if (offset == 0) {
-        const float s_ptx = 1.0f/PARTICLES_SIZE; // change to gaussian
+        // const float s_ptx = 1.0f/PARTICLES_SIZE; // change to gaussian
+        float s_ptx = abs(cuGenerateGaussian(global_state, offset));
+        s_ptx *= (1.0f / PARTICLES_SIZE);        
         int cdf_stx = 1;
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             float ptx = s_ptx + (1.0/PARTICLES_SIZE) * (i - 1);
@@ -280,10 +287,14 @@ void cuPFSequentialResample(
     }
 
     __syncthreads();
-    
+
+    // t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    // t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    // offset = t_idx + t_idy * blockDim.x * gridDim.x;
     if (offset < PARTICLES_SIZE) {
         particles[offset] = cache[offset];
     }
+    __syncthreads();
 }
 
 __device__
@@ -328,8 +339,8 @@ void cuPFTransition(cuParticles *prop_particles,
             for (int j = 0; j < STATE_SIZE; j++) {
                 sum += DYNAMICS[i][j] * element[j];
             }
-            transition[i] = sum + cuGenerateGaussian(global_state, offset);;
-        }
+            transition[i] = sum + cuGenerateGaussian(global_state, offset) * SIGMA;
+        }        
         cuParticles nxt_particle;
         nxt_particle.x = transition[0];
         nxt_particle.y = transition[1];
@@ -367,9 +378,18 @@ void cuInitParticles(
     dim = PARTICLES_SIZE * sizeof(cuParticles);
     cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
 
+    // particles_ = particles;
+    
     cudaFree(d_corners);
     cudaFree(d_particles);    
 }
+
+
+/**
+ * 
+ */
+cuPFFeatures ref_features_;
+std::vector<Particle> cpu_particles_;
 
 __host__
 void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
@@ -391,8 +411,8 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     box_corners[2] = rect.x + rect.width;
     box_corners[3] = rect.y + rect.height;
     
-    // dim3 block_size(1, PARTICLES_SIZE);
-    dim3 block_size(PARTICLES_SIZE, 1);
+    dim3 block_size(1, PARTICLES_SIZE);
+    // dim3 block_size(PARTICLES_SIZE, 1);
     dim3 grid_size(1, 1);
 
     cudaEvent_t d_start;
@@ -400,15 +420,37 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventCreate(&d_start); 
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
-    
+
+
+    bool is_on = true;
     if (is_init) {
         printf("\033[34m INITIALIZING TRACKER \033[0m\n");
-        cuInitParticles(particles_, box_corners, block_size, grid_size);
+        cuParticles particles[PARTICLES_SIZE];
+        cuInitParticles(particles, box_corners, block_size, grid_size);
 
-        // compute weight
+        for (int i = 0; i < PARTICLES_SIZE; i++) {
+            particles_[i] = particles[i];
+        }
+
+        
+        // compute weight -----------------------
+        for(int i = 0; i < PARTICLES_SIZE; i++) {
+            Particle p;
+            p.x = (double)particles_[i].x;
+            p.y = particles_[i].y;
+            p.dx = particles_[i].dx;
+            p.dy = particles_[i].dy;
+            cpu_particles_.push_back(p);
+        }
+        cuCreateParticlesFeature(ref_features_, image, cpu_particles_, 1);
+        printf("\033[34m TRACKER INITIALIZED  \033[0m\n");
+        /// ---------------------------------------
         
         is_init = false;
-    } else {
+    } else if (is_on) {
+
+        printf("\033[32m PROPAGATION  \033[0m\n");
+        
         cuParticles *d_particles;
         cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
         cudaMemcpy(d_particles, particles_, sizeof(cuParticles) * PARTICLES_SIZE,
@@ -423,20 +465,77 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cudaMemcpy(x_particles, d_trans_particles, sizeof(cuParticles) *
                    PARTICLES_SIZE, cudaMemcpyDeviceToHost);
 
-        // compute weight
+        printf("\033[32m COMPUTING WEIGHT  \033[0m\n");
         
+        // compute weight -----------------------
+        std::vector<Particle> cpu_particles;
+        for(int i = 0; i < PARTICLES_SIZE; i++) {
+            Particle p;
+            p.x = (double)particles_[i].x;
+            p.y = particles_[i].y;
+            p.dx = particles_[i].dx;
+            p.dy = particles_[i].dy;
+            cpu_particles.push_back(p);
+        }
+        cuPFFeatures features;
+        cuCreateParticlesFeature(features, image, cpu_particles, 1);
+        std::vector<float> prob = cuHistogramLikelihood(
+            cpu_particles, cpu_particles_, image, features, ref_features_);
+
+        float *probabilities = (float*)malloc(sizeof(float) * PARTICLES_SIZE);
+        for (int i = 0; i < prob.size(); i++) {
+            probabilities[i] = prob[i];
+        }
+        float *d_probs;
+        cudaMalloc((void**)&d_probs, sizeof(float) * PARTICLES_SIZE);
+        cudaMemcpy(d_probs, probabilities, sizeof(float) * PARTICLES_SIZE,
+                   cudaMemcpyHostToDevice);
+
+        printf("\033[32m NORMALIZATION  \033[0m\n");
+        
+        cuPFNormalizeWeights<<<grid_size, block_size>>>(d_probs);
+        cudaDeviceSynchronize();
+
+        printf("\033[32m CUMULATIVE SUM  \033[0m\n");
+        
+        cuPFCumulativeSum<<<grid_size, block_size>>>(d_probs);
+        cudaDeviceSynchronize();
+
+        printf("\033[32m SAMPLING  \033[0m\n");
+        
+        cuPFSequentialResample<<<grid_size, block_size>>>(
+            d_particles, d_trans_particles, d_probs, d_state_);
+
+        cuParticles *update_part = (cuParticles*)malloc(sizeof(cuParticles) *
+                                                        PARTICLES_SIZE);
+        cudaMemcpy(update_part, d_particles, sizeof(cuParticles) * PARTICLES_SIZE,
+                   cudaMemcpyDeviceToHost);
+
+        printf("\033[32m UPDATING  \033[0m\n");
+        
+        for (int i = 0; i < PARTICLES_SIZE; i++) {
+            particles_[i] = update_part[i];
+        }
+        
+        printf("\033[31m DONE  \033[0m\n");
+
+        /// ---------------------------------------
+
         
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             cv::Point2f center = cv::Point2f(x_particles[i].x,
                                              x_particles[i].y);
             cv::circle(image, center, 3, cv::Scalar(0, 255, 255), CV_FILLED);
+
+            center = cv::Point2f(update_part[i].x, update_part[i].y);
+            cv::circle(image, center, 3, cv::Scalar(0, 255, 0), CV_FILLED);
         }    
     }
     
     for (int i = 0; i < PARTICLES_SIZE; i++) {
         cv::Point2f center = cv::Point2f(particles_[i].x,
                                          particles_[i].y);
-        cv::circle(image, center, 3, cv::Scalar(255, 0, 255), CV_FILLED);
+        // cv::circle(image, center, 3, cv::Scalar(255, 0, 255), CV_FILLED);
     }
     
     /* normalize check */
@@ -457,9 +556,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaMemcpy(d_weight, weights, sizeof(float) * PARTICLES_SIZE,
                cudaMemcpyHostToDevice);
 
-    // cuPFNormalizeWeights<<<grid_size, block_size>>>(d_weight);
-    // cuPFCumulativeSum<<<grid_size, block_size>>>(d_weight);
-
+    cuPFNormalizeWeights<<<grid_size, block_size>>>(d_weight);
     
     float *nweights = (float*)malloc(sizeof(float) * PARTICLES_SIZE);
     cudaMemcpy(nweights, d_weight, sizeof(float) * PARTICLES_SIZE,
@@ -468,6 +565,17 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     for (int i = 0; i < PARTICLES_SIZE; i++) {
         std::cout << nweights[i]  << ", ";
         sum += nweights[i];
+    }
+    std::cout  << "\n Sum: " << sum << "\n\n";
+
+    float *cweights = (float*)malloc(sizeof(float) * PARTICLES_SIZE);
+    cuPFCumulativeSum<<<grid_size, block_size>>>(d_weight);
+    cudaMemcpy(cweights, d_weight, sizeof(float) * PARTICLES_SIZE,
+               cudaMemcpyDeviceToHost);
+    sum = 0.0;
+    for (int i = 0; i < PARTICLES_SIZE; i++) {
+        std::cout << cweights[i]  << ", ";
+        sum += cweights[i];
     }
     std::cout  << "\n Sum: " << sum << "\n";
     /*-----------------*/

@@ -145,6 +145,7 @@ cuda_add_executable(gpu_particle_filter_node
   src/particle_filter.cpp
   src/color_histogram.cpp
   src/particle_filter_kernel.cu
+  src/color_histogram_kernel.cu
 )
 
 ## Add cmake target dependencies of the executable
