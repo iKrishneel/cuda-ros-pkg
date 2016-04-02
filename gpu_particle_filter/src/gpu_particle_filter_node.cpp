@@ -12,7 +12,7 @@ ParticleFilterGPU::ParticleFilterGPU():
     cv::Size wsize = cv::Size(16/downsize_, 16/downsize_);
     cv::Size bsize = cv::Size(16/downsize_, 16/downsize_);
     cv::Size csize = cv::Size(8/downsize_, 8/downsize_);
-    this->hog_ = cv::cuda::HOG::create(wsize, bsize, csize);
+    // this->hog_ = cv::cuda::HOG::create(wsize, bsize, csize);
     
     this->onInit();
 }
@@ -71,6 +71,25 @@ void ParticleFilterGPU::imageCB(
                                           image.rows/this->downsize_));
     }
 
+
+
+    /**
+     * test
+     */
+    ROS_ERROR("RUNNING TRACKER");
+    if (tracker_init_) {
+        cv::Mat roi = image(screen_rect_).clone();
+        cv::Mat hist;
+        getHistogram(hist, roi, 8, 3, false);
+
+        gpuHist(roi, hist);
+    }
+    return;
+    /**
+     * end test
+     */
+
+    
     if (tracker_init_) {
         particleFilterGPU(image, screen_rect_, gpu_init_);
     } else {

@@ -18,9 +18,14 @@ const int N = 16;
 #define BLOCK_SIZE 16
 #define PARTICLES_SIZE 500
 #define STATE_SIZE 4
-#define SIGMA 5
+#define G_SIGMA 5
+
+#define COLOR_BINS 8
+#define COLOR_CHANNEL 3
 
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
+
+void gpuHist(cv::Mat image, cv::Mat cpu_hist);
 
 /**
  * 
