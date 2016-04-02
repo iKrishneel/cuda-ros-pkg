@@ -389,11 +389,28 @@ void cuInitParticles(
 
 __global__ __forceinline__
 void cuPFColorHistogram(
-    unsigned int *histogram, cuImage *image, int width, int height) {
+    int *histogram, cuImage *image, int width, int height) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
-    // int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
 
+    int bin_range = static_cast<int>(ceilf(256/COLOR_BINS));
+    if (offset < (height * width)) {
+        int b = static_cast<int>(image[offset].pixel[0]);
+        int bin_num_b = static_cast<int>(floorf(b/bin_range));
+        atomicAdd(&histogram[bin_num_b], 1);
+        
+        int g = static_cast<int>(image[offset].pixel[1]);
+        int bin_num_g = static_cast<int>(floorf(g/bin_range));
+        atomicAdd(&histogram[bin_num_g + COLOR_BINS], 1);
+        
+        int r = static_cast<int>(image[offset].pixel[2]);
+        int bin_num_r = static_cast<int>(floorf(r/bin_range));
+        atomicAdd(&histogram[bin_num_r + (2 * COLOR_BINS)], 1);
+    }
+    __syncthreads();
+    
+    /*
     int incr = blockDim.x * blockDim.y;
     int thread = threadIdx.x + threadIdx.y * blockDim.x;
     
@@ -423,14 +440,13 @@ void cuPFColorHistogram(
     }
     __syncthreads();
 
-    // histogram += (blockIdx.x + blockIdx.y * gridDim.x);
+    int off_idx = blockIdx.x + blockIdx.y * gridDim.x;
     for (int i = thread; i < COLOR_BINS * COLOR_CHANNEL;  i += incr) {
-        histogram[i] = hist[i];
-        // atomicAdd(&histogram[i], hist[i]);
+        histogram[i + off_idx] = hist[i];
+        // atomicAdd(&histogram[i + off_idx], hist[i]);
     }
+    */
 }
-
-
 
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
@@ -445,6 +461,13 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
             }
         }
     }
+
+    cudaEvent_t d_start;
+    cudaEvent_t d_stop;
+    cudaEventCreate(&d_start); 
+    cudaEventCreate(&d_stop);
+    cudaEventRecord(d_start, 0);
+    
     cuImage *d_image;
     cudaMalloc((void**)&d_image, SIZE);
     cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
@@ -453,8 +476,8 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     dim3 grid_size(cuDivUp(image.cols, BLOCK_SIZE),
                    cuDivUp(image.rows, BLOCK_SIZE));
 
-    unsigned int *d_histogram;
-    size_t MEM_SIZE = COLOR_BINS * COLOR_CHANNEL * sizeof(unsigned int);
+    int *d_histogram;
+    size_t MEM_SIZE = COLOR_BINS * COLOR_CHANNEL * sizeof(int);
     cudaMalloc((void**)&d_histogram, MEM_SIZE);
     cudaMemset(d_histogram, 0, MEM_SIZE);
     
@@ -462,14 +485,22 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
                                                   image.cols,
                                                   image.rows);
     
-    unsigned int *histogram = (unsigned int*)malloc(MEM_SIZE);
+    int *histogram = (int*)malloc(MEM_SIZE);
     cudaMemcpy(histogram, d_histogram, MEM_SIZE, cudaMemcpyDeviceToHost);
+
+
+    cudaEventRecord(d_stop, 0);
+    cudaEventSynchronize(d_stop);
+    float elapsed_time;
+    cudaEventElapsedTime(&elapsed_time, d_start, d_stop);
+    std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
+              << "\n";
     
     for (int j = 0; j < cpu_hist.rows; j++) {
         for (int i = 0; i < cpu_hist.cols; i++) {
             int offset = i + (j * cpu_hist.cols);
-            std::cout << "DIFF: " << cpu_hist.at<float>(j ,i)  << "  "
-                      << histogram[offset]  << "\n";
+            // std::cout << "DIFF: " << cpu_hist.at<float>(j ,i)  << "  "
+            //           << histogram[offset]  << "\n";
         }
     }
     std::cout << cpu_hist.size() <<  "\n"  << "\n";
