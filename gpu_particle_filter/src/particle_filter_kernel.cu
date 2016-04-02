@@ -36,6 +36,24 @@ struct cuImage{
     unsigned char pixel[3];
 };
 
+
+__device__
+struct cuRect {
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+__host__ __device__
+struct cuPFFeature {
+    // int *color_hist; //[COLOR_BINS * COLOR_CHANNEL];
+    // int *hog_hist; //[36];
+    int color_hist[COLOR_BINS * COLOR_CHANNEL];
+    int hog_hist[36];
+};
+
+
 // __host__
 cuParticles particles_[PARTICLES_SIZE];
 
@@ -386,7 +404,6 @@ void cuInitParticles(
 /**
  * features on GPU
  */
-
 __global__ __forceinline__
 void cuPFColorHistogram(
     int *histogram, cuImage *image, int width, int height) {
@@ -409,43 +426,109 @@ void cuPFColorHistogram(
         atomicAdd(&histogram[bin_num_r + (2 * COLOR_BINS)], 1);
     }
     __syncthreads();
-    
-    /*
-    int incr = blockDim.x * blockDim.y;
-    int thread = threadIdx.x + threadIdx.y * blockDim.x;
-    
-    __shared__ unsigned int hist[COLOR_BINS * COLOR_CHANNEL];
-    for (int i = thread; i < COLOR_BINS * COLOR_CHANNEL;  i += incr) {
-        hist[i] = 0;
-    }
-    __syncthreads();
+}
 
+__device__ __forceinline__
+void cuPFRoiCondition(
+    cuRect *rect, int width, int height) {
+    if (rect->x < 0) {
+        rect->x = 0;
+    }
+    if (rect->y < 0) {
+        rect->y = 0;
+    }
+    if ((rect->width + rect->x) > width) {
+        rect->x -= ((rect->width + rect->x) - width);
+    }
+    if ((rect->height + rect->y) > height) {
+        rect->y -= ((rect->height + rect->y) - height);
+    }
+}
+
+
+__device__ __forceinline__
+int *cuPFGetROIHistogram(
+    cuImage *image, cuParticles particle, int width, int height, int patch_sz) {
+    int histogram[COLOR_BINS * COLOR_CHANNEL];
+    for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
+        histogram[i] = 0;
+    }
+    if (patch_sz < 2 || width < patch_sz || height < patch_sz) {
+        return histogram;
+    }
+    
+    cuRect rect;
+    rect.x = particle.x - (patch_sz/2);
+    rect.y = particle.y - (patch_sz/2);
+    rect.width = rect.x + patch_sz;
+    rect.height = rect.y + patch_sz;
+    cuPFRoiCondition(&rect, width, height);
+    
     int bin_range = static_cast<int>(ceilf(256/COLOR_BINS));
-    for (int j = t_idy; j < height; j += (blockDim.y + gridDim.y)) {
-        for (int i = t_idx; i < width; i += (blockDim.x + gridDim.x)) {
-            int index = i + (j * width);
-            unsigned int b = static_cast<unsigned int>(image[index].pixel[0]);
-            int bin_num = static_cast<int>(floorf(b/bin_range));
-            atomicAdd(&hist[bin_num], 1);
-            
-            unsigned int g = static_cast<unsigned int>(image[index].pixel[1]);
-            bin_num = static_cast<int>(floorf(g/bin_range));
-            atomicAdd(&hist[bin_num + COLOR_BINS], 1);
-            
-            unsigned int r = static_cast<unsigned int>(image[index].pixel[2]);
-            bin_num = static_cast<int>(floorf(r/bin_range));
-            atomicAdd(&hist[bin_num + (2 * COLOR_BINS)], 1);
-            
+    for (int y = rect.y; y < rect.height; y++) {
+        for (int x = rect.x; x < rect.width; x++) {
+            int offset = x + (y * width);
+            if (offset < (height * width)) {
+                for (int z = 0; z < COLOR_CHANNEL; z++) {
+                    int b = static_cast<int>(image[offset].pixel[z]);
+                    int bin_num = static_cast<int>(floorf(b/bin_range));
+                    histogram[bin_num + (z * COLOR_BINS)]++;
+                }
+            }
         }
     }
-    __syncthreads();
+    
+    return histogram;
+}
 
-    int off_idx = blockIdx.x + blockIdx.y * gridDim.x;
-    for (int i = thread; i < COLOR_BINS * COLOR_CHANNEL;  i += incr) {
-        histogram[i + off_idx] = hist[i];
-        // atomicAdd(&histogram[i + off_idx], hist[i]);
+__global__ __forceinline__
+void cuPFParticleFeatures(
+    cuPFFeature *features, cuImage *image, cuParticles *particles,
+    int width, int height, int patch_sz) {
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    int *histo;
+    if (offset < PARTICLES_SIZE) {
+        // features[offset].color_hist = cuPFGetROIHistogram(
+        //     image, particles[offset], width, height, patch_sz);
+        
+        histo = cuPFGetROIHistogram(
+            image, particles[offset], width, height, patch_sz);
+        
+        for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
+            features[offset].color_hist[i] = 0;
+        }
+        cuRect rect;
+        rect.x = particles[offset].x - (patch_sz/2);
+        rect.y = particles[offset].y - (patch_sz/2);
+        rect.width = rect.x + patch_sz;
+        rect.height = rect.y + patch_sz;
+        cuPFRoiCondition(&rect, width, height);
+
+        int bin_range = static_cast<int>(ceilf(256/COLOR_BINS));
+        for (int y = rect.y; y < rect.height; y++) {
+            for (int x = rect.x; x < rect.width; x++) {
+                int index = x + (y * width);
+                if (index < (height * width)) {
+                    for (int z = 0; z < COLOR_CHANNEL; z++) {
+                        int b = static_cast<int>(image[index].pixel[z]);
+                        int bin_num = static_cast<int>(floorf(b/bin_range));
+                        features[offset].color_hist[bin_num + (z * COLOR_BINS)]++;
+                    }
+                }
+            }
+        }
     }
-    */
+    
+    __syncthreads();
+    
+    for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
+        printf("%d  %d \n", features[offset].color_hist[i], histo[i]);
+    }
+    printf("\n------------------------------------\n");
+    
 }
 
 
@@ -467,11 +550,13 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     cudaEventCreate(&d_start); 
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
+
     
     cuImage *d_image;
     cudaMalloc((void**)&d_image, SIZE);
     cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
 
+    
     dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid_size(cuDivUp(image.cols, BLOCK_SIZE),
                    cuDivUp(image.rows, BLOCK_SIZE));
@@ -499,27 +584,12 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     for (int j = 0; j < cpu_hist.rows; j++) {
         for (int i = 0; i < cpu_hist.cols; i++) {
             int offset = i + (j * cpu_hist.cols);
-            // std::cout << "DIFF: " << cpu_hist.at<float>(j ,i)  << "  "
-            //           << histogram[offset]  << "\n";
+            std::cout << "DIFF: " << cpu_hist.at<float>(j ,i)  << "  "
+                      << histogram[offset]  << "\n";
         }
     }
     std::cout << cpu_hist.size() <<  "\n"  << "\n";
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -571,7 +641,6 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             particles_[i] = particles[i];
         }
-
         
         // compute weight -----------------------
         for(int i = 0; i < PARTICLES_SIZE; i++) {
@@ -584,7 +653,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         }
         cuCreateParticlesFeature(ref_features_, image, cpu_particles_, 1);
         printf("\033[34m TRACKER INITIALIZED  \033[0m\n");
-        /// ---------------------------------------
+        /// ---------------------------------------        
         
         is_init = false;
     } else if (is_on) {
@@ -594,7 +663,9 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cuParticles *d_particles;
         cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
         cudaMemcpy(d_particles, particles_, sizeof(cuParticles) * PARTICLES_SIZE,
-                   cudaMemcpyHostToDevice);   // fix to keep previous particles
+                   cudaMemcpyHostToDevice);   // fix to keep previous
+                                              // particles
+        
         cuParticles *d_trans_particles;
         cudaMalloc((void**)&d_trans_particles,
                    sizeof(cuParticles) * PARTICLES_SIZE);
@@ -605,16 +676,53 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cudaMemcpy(x_particles, d_trans_particles, sizeof(cuParticles) *
                    PARTICLES_SIZE, cudaMemcpyDeviceToHost);
 
+
+        // ********************************
+        // cudaDeviceSynchronize();
+        cuPFFeature *d_features;
+        cudaMalloc((void**)&d_features, sizeof(cuPFFeature) * PARTICLES_SIZE);
+
+        cuImage *d_image;
+        cudaMalloc((void**)&d_image, SIZE);
+        cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
+
+        
+        cuPFParticleFeatures<<<grid_size, block_size>>>(
+            d_features, d_image, d_particles, image.cols, image.rows, 8);
+        
+        
+        cuPFFeature *particles_features = (cuPFFeature*)malloc(
+            sizeof(cuPFFeature) * PARTICLES_SIZE);
+        cudaMemcpy(particles_features, d_features, sizeof(cuPFFeature) *
+                   PARTICLES_SIZE, cudaMemcpyDeviceToHost);
+
+        /*
+        std::cout << "PRINTING....."  << "\n";
+
+        for (int i = 0; i < PARTICLES_SIZE; i++) {
+            std::cout << "PROCESSING: " << i  << "\n";
+            for (int j = 0; j < COLOR_BINS * COLOR_CHANNEL; j++) {
+                std::cout << particles_features[i].color_hist[j] << ", "
+                          << j << "  -- ";
+            }
+            std::cout << "\n";
+        }        
+        */
+        return;
+        //*******************************/
+        
+
+        
         printf("\033[32m COMPUTING WEIGHT  \033[0m\n");
         
         // compute weight -----------------------
         std::vector<Particle> cpu_particles;
         for(int i = 0; i < PARTICLES_SIZE; i++) {
             Particle p;
-            p.x = (double)particles_[i].x;
-            p.y = particles_[i].y;
-            p.dx = particles_[i].dx;
-            p.dy = particles_[i].dy;
+            p.x = (double)x_particles[i].x;
+            p.y = x_particles[i].y;
+            p.dx = x_particles[i].dx;
+            p.dy = x_particles[i].dy;
             cpu_particles.push_back(p);
         }
         cuPFFeatures features;
@@ -630,7 +738,8 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cudaMalloc((void**)&d_probs, sizeof(float) * PARTICLES_SIZE);
         cudaMemcpy(d_probs, probabilities, sizeof(float) * PARTICLES_SIZE,
                    cudaMemcpyHostToDevice);
-
+        
+        
         printf("\033[32m NORMALIZATION  \033[0m\n");
         
         cuPFNormalizeWeights<<<grid_size, block_size>>>(d_probs);

@@ -16,7 +16,7 @@
 const int N = 16;
 
 #define BLOCK_SIZE 16
-#define PARTICLES_SIZE 500
+#define PARTICLES_SIZE 2
 #define STATE_SIZE 4
 #define G_SIGMA 5
 
