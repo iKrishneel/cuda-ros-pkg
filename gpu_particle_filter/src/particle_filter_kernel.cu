@@ -49,14 +49,14 @@ __host__ __device__
 struct cuPFFeature {
     // int *color_hist;
     // int *hog_hist;
-    int color_hist[COLOR_BINS * COLOR_CHANNEL];
+    float color_hist[COLOR_BINS * COLOR_CHANNEL];
     float hog_hist[36];
 };
 
 
 // __host__
 cuParticles particles_[PARTICLES_SIZE];
-
+cuPFFeature features_[PARTICLES_SIZE];
 curandState_t *d_state_;
 
 /**
@@ -366,39 +366,16 @@ void cuPFTransition(cuParticles *prop_particles,
     }
 }
 
-__global__
+/**
+ * FIX TO COMPUTE 3.0
+ */
+__global__ __forceinline__
 void cuPFPropagation(
     cuParticles *trans_particles,
     cuParticles *particles, curandState_t *global_state) {
     cuPFTransition(trans_particles, particles, global_state);    
 }
 
-__host__
-void cuInitParticles(
-    cuParticles *particles, float *box_corners,
-    const dim3 block_size, const dim3 grid_size) {
-
-    srand(time(NULL));
-    
-    size_t dim = 4 * sizeof(float);
-    float *d_corners;
-    cudaMalloc((void**)&d_corners, dim);
-    cudaMemcpy(d_corners, box_corners, dim, cudaMemcpyHostToDevice);
-    cudaMalloc((void**)&d_state_, PARTICLES_SIZE * sizeof(curandState_t));
-    curandInit<<<grid_size, block_size>>>(d_state_, unsigned(time(NULL)));
-
-    cuParticles *d_particles;
-    cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
-    cuPFInitalizeParticles<<<grid_size, block_size>>>(
-        d_particles, d_state_, d_corners);
-    dim = PARTICLES_SIZE * sizeof(cuParticles);
-    cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
-
-    // particles_ = particles;
-    
-    cudaFree(d_corners);
-    cudaFree(d_particles);    
-}
 
 
 /**
@@ -483,19 +460,23 @@ int *cuPFGetROIHistogram(
 
 __global__ __forceinline__
 void cuPFParticleFeatures(
-    cuPFFeature *features, cuImage *image, cuParticles *particles,
+    cuPFFeature *color_features, cuImage *image, cuParticles *particles,
     int width, int height, int patch_sz) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
 
-    int *histo;
+    __shared__ int max_values[PARTICLES_SIZE];
+    cuPFFeature features;
+    
     if (offset < PARTICLES_SIZE) {
         // features[offset].color_hist = cuPFGetROIHistogram(
         //     image, particles[offset], width, height, patch_sz);
 
+        max_values[offset] = 0;
+        
         for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
-            features[offset].color_hist[i] = 0;
+            features.color_hist[i] = 0.0;
         }
         cuRect rect;
         rect.x = particles[offset].x - (patch_sz/2);
@@ -512,25 +493,71 @@ void cuPFParticleFeatures(
                     for (int z = 0; z < COLOR_CHANNEL; z++) {
                         int b = static_cast<int>(image[index].pixel[z]);
                         int bin_num = static_cast<int>(floorf(b/bin_range));
-                        features[offset].color_hist[bin_num + (z * COLOR_BINS)]++;
+                        features.color_hist[bin_num + (z * COLOR_BINS)]+= 1.0f;
+                        max_values[offset]++;  // sum of features
                     }
                 }
             }
         }
-
     }
     
     __syncthreads();
     
-    for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
-        printf("%d  %d \n", features[offset].color_hist[i]);
+    // normalize
+    if (offset < PARTICLES_SIZE) {
+        float max_val = static_cast<float>(max_values[offset]);
+        for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
+            color_features[offset].color_hist[i] =
+                features.color_hist[i] / max_val;
+        }
     }
-    printf("\n------------------------------------\n");
-    
 }
 
 /**
- * color histogram
+ * HOG features on gpu via OpenCV
+ */
+__host__
+void computeHOG(cuPFFeature *features, cuParticles *particles,
+                cv::Mat image, const int patch_sz, const int downsize) {
+    cv::Size wsize = cv::Size(patch_sz/downsize, patch_sz/downsize);
+    cv::Size bsize = cv::Size(patch_sz/downsize, patch_sz/downsize);
+    cv::Size csize = cv::Size(patch_sz/(downsize * 2), patch_sz/(downsize * 2));
+    cv::Ptr<cv::cuda::HOG> hog = cv::cuda::HOG::create(wsize, bsize, csize);
+    for (int i = 0; i < PARTICLES_SIZE; i++) {
+        cv::Rect_<int> rect = cv::Rect_<int>(particles[i].x - patch_sz/2,
+                                             particles[i].y - patch_sz/2,
+                                             patch_sz, patch_sz);
+        if (rect.x < 0) {
+            rect.x = 0;
+        }
+        if (rect.y < 0) {
+            rect.y = 0;
+        }
+        if ((rect.height + rect.y) > image.rows) {
+            rect.y -= ((rect.height + rect.y) - image.rows);
+        }
+        if ((rect.width + rect.x) > image.cols) {
+            rect.x -= ((rect.width + rect.x) - image.cols);
+        }
+        cv::cuda::GpuMat d_roi(image(rect));
+        cv::cuda::GpuMat d_desc;
+        cv::cuda::cvtColor(d_roi, d_roi, CV_BGR2GRAY);
+        hog->compute(d_roi, d_desc);
+        cv::Mat desc;
+        d_desc.download(desc);
+        
+        for (int j = 0; j < desc.rows; j++) {
+            for (int k = 0; k < desc.cols; k++) {
+                features[i].hog_hist[k + (j * patch_sz)] =
+                    static_cast<float>(desc.at<float>(j, k));
+            }
+        }
+    }
+}
+
+
+/**
+ * color histogram TEST FUNCTION
  */
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
@@ -645,18 +672,80 @@ void cuPFParticleLikelihoods(
         float prob = 0.0f;
         if (match_idx != -1) {
             float c_dist = 0.0f;
-            // float c_dist = cuBhattacharyyaDist(templ_features[i].color_hist
-            //                                    features[offset].color_hist,
-            //                                    COLOR_BINS * COLOR_CHANNEL);
-            prob = 1.0f * expf(-0.7f * c_dist) * 1.0f * expf(-0.7f * h_dist);
+            // float c_dist = cuBhattacharyyaDist(
+            //     templ_features[match_idx].color_hist,
+            //     features[match_idx].color_hist, COLOR_BINS * COLOR_CHANNEL);
+            prob = 1.0f * expf(-COLOR_CONTRL * c_dist) *
+                1.0f * expf(-HOG_CONTRL * h_dist);
             
-            if (prob < 0.7f) {
+            if (prob < PROBABILITY_THRESH) { 
                 prob = 0.0f;
             }
         }
         probs[offset] = prob;
     }
 }
+
+__host__
+void cuInitParticles(
+    cuParticles *particles, float *box_corners, cv::Mat image,
+    const dim3 block_size, const dim3 grid_size) {
+
+    srand(time(NULL));
+    
+    size_t dim = 4 * sizeof(float);
+    float *d_corners;
+    cudaMalloc((void**)&d_corners, dim);
+    cudaMemcpy(d_corners, box_corners, dim, cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&d_state_, PARTICLES_SIZE * sizeof(curandState_t));
+    curandInit<<<grid_size, block_size>>>(d_state_, unsigned(time(NULL)));
+
+    cuParticles *d_particles;
+    cudaMalloc((void**)&d_particles, sizeof(cuParticles) * PARTICLES_SIZE);
+    cuPFInitalizeParticles<<<grid_size, block_size>>>(d_particles,
+                                                      d_state_, d_corners);
+    dim = PARTICLES_SIZE * sizeof(cuParticles);
+    cudaMemcpy(particles, d_particles, dim, cudaMemcpyDeviceToHost);
+
+    cudaDeviceSynchronize();
+    
+    // TODO: COMPUTE INITIAL FEATURE
+    const int SIZE = static_cast<int>(image.rows * image.cols) * sizeof(cuImage);
+    cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
+    for (int j = 0; j < image.rows; j++) {
+        for (int i = 0; i < image.cols; i++) {
+            int index = i + (j * image.cols);
+            for (int k = 0; k < 3; k++) {
+                pixels[index].pixel[k] = static_cast<unsigned char>(
+                    image.at<cv::Vec3b>(j, i)[k]);
+            }
+        }
+    }
+    cuImage *d_image;
+    cudaMalloc((void**)&d_image, SIZE);
+    cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
+        
+    cuPFFeature *d_features;
+    cudaMalloc((void**)&d_features, sizeof(cuPFFeature) * PARTICLES_SIZE);
+        
+    cuPFParticleFeatures<<<grid_size, block_size>>>(
+        d_features, d_image, d_particles, image.cols, image.rows, PATCH_SIZE/2);
+        
+    // cuPFFeature *particles_features = (cuPFFeature*)malloc(
+    //     sizeof(cuPFFeature) * PARTICLES_SIZE);
+    cudaMemcpy(features_, d_features, sizeof(cuPFFeature) *
+               PARTICLES_SIZE, cudaMemcpyDeviceToHost);
+
+    cudaDeviceSynchronize();    
+
+    computeHOG(features_, particles, image, PATCH_SIZE, 1);
+    // ****************************
+
+    
+    cudaFree(d_corners);
+    cudaFree(d_particles);    
+}
+
 
 
 /**
@@ -695,12 +784,13 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventRecord(d_start, 0);
 
 
-    bool is_on = true;
+    bool is_on = false;
     if (is_init) {
         printf("\033[34m INITIALIZING TRACKER \033[0m\n");
+        
         cuParticles particles[PARTICLES_SIZE];
-        cuInitParticles(particles, box_corners, block_size, grid_size);
-
+        cuInitParticles(particles, box_corners, image, block_size, grid_size);
+        
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             particles_[i] = particles[i];
         }
