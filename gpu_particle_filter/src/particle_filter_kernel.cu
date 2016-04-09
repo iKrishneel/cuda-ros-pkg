@@ -47,10 +47,10 @@ struct cuRect {
 
 __host__ __device__
 struct cuPFFeature {
-    // int *color_hist; //[COLOR_BINS * COLOR_CHANNEL];
-    // int *hog_hist; //[36];
+    // int *color_hist;
+    // int *hog_hist;
     int color_hist[COLOR_BINS * COLOR_CHANNEL];
-    int hog_hist[36];
+    float hog_hist[36];
 };
 
 
@@ -493,10 +493,7 @@ void cuPFParticleFeatures(
     if (offset < PARTICLES_SIZE) {
         // features[offset].color_hist = cuPFGetROIHistogram(
         //     image, particles[offset], width, height, patch_sz);
-        
-        histo = cuPFGetROIHistogram(
-            image, particles[offset], width, height, patch_sz);
-        
+
         for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
             features[offset].color_hist[i] = 0;
         }
@@ -520,17 +517,21 @@ void cuPFParticleFeatures(
                 }
             }
         }
+
     }
     
     __syncthreads();
     
     for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
-        printf("%d  %d \n", features[offset].color_hist[i], histo[i]);
+        printf("%d  %d \n", features[offset].color_hist[i]);
     }
     printf("\n------------------------------------\n");
     
 }
 
+/**
+ * color histogram
+ */
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     const int SIZE = static_cast<int>(image.rows * image.cols) * sizeof(cuImage);
@@ -592,8 +593,70 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
 }
 
 
+/**
+ * histogram likelihood
+ */
+
+__device__ __forceinline__
+float cuEuclideanDist(cuParticles *a, cuParticles *b) {
+    float dist = ((a->x - b->x) * (a->x - b->x)) + ((a->y - b->y) * (a->y - b->y));
+    return sqrtf(dist);
+}
 
 
+__device__ __forceinline__
+float cuBhattacharyyaDist(float *histA, float *histB, int dimension) {
+    float prod = 0.0f;
+    float norm_a = 0.0f;
+    float norm_b = 0.0f;
+    for (int i = 0; i < dimension; i++) {
+        prod += (sqrtf(histA[i] * histB[i]));
+        norm_a += histA[i];
+        norm_b += histB[i];
+    }
+    norm_a /= static_cast<float>(dimension);
+    norm_b /= static_cast<float>(dimension);
+
+    float norm = 1.0f / sqrtf(norm_a * norm_b * powf(dimension, 2));
+    return sqrtf(1.0f - norm * prod);
+}
+
+__global__
+void cuPFParticleLikelihoods(
+    float *probs, cuParticles *particles, cuParticles *templ_particles,
+    cuPFFeature *features, cuPFFeature *templ_features) {
+    
+    int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+
+    if (offset < PARTICLES_SIZE) {
+        float h_dist = FLT_MAX;
+        int match_idx = -1;
+        for (int i = 0; i < PARTICLES_SIZE; i++) {
+            float d_hog = cuBhattacharyyaDist(templ_features[i].hog_hist,
+                                              features[offset].hog_hist, HOG_DIM);
+            if (d_hog < h_dist) {
+                h_dist = d_hog;
+                match_idx = i;
+            }
+        }
+
+        float prob = 0.0f;
+        if (match_idx != -1) {
+            float c_dist = 0.0f;
+            // float c_dist = cuBhattacharyyaDist(templ_features[i].color_hist
+            //                                    features[offset].color_hist,
+            //                                    COLOR_BINS * COLOR_CHANNEL);
+            prob = 1.0f * expf(-0.7f * c_dist) * 1.0f * expf(-0.7f * h_dist);
+            
+            if (prob < 0.7f) {
+                prob = 0.0f;
+            }
+        }
+        probs[offset] = prob;
+    }
+}
 
 
 /**
@@ -702,12 +765,10 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             std::cout << "PROCESSING: " << i  << "\n";
             for (int j = 0; j < COLOR_BINS * COLOR_CHANNEL; j++) {
-                std::cout << particles_features[i].color_hist[j] << ", "
-                          << j << "  -- ";
+                std::cout << particles_features[i].color_hist[j] << "  ";
             }
             std::cout << "\n";
-        }        
-        */
+        }
         return;
         //*******************************/
         

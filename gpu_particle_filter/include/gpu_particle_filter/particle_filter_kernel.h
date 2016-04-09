@@ -23,6 +23,8 @@ const int N = 16;
 #define COLOR_BINS 8
 #define COLOR_CHANNEL 3
 
+#define HOG_DIM 36
+
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist);
