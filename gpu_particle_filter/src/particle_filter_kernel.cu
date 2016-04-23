@@ -6,13 +6,13 @@
         cudaAssert((process), __FILE__, __LINE__); \
     }                                              \
 
-void cudaAssert(cudaError_t code, char *file, int line, bool abort=true) {
+void cudaAssert(cudaError_t code, char *file, int line, bool abort = true) {
     if (code != cudaSuccess) {
-        fprintf(stderr,"GPUassert: %s %s %dn",
-                cudaGetErrorString(code), file, line);
-        if (abort) {
-            exit(code);
-        }
+       fprintf (stderr,"GPUassert: %s %s %dn",
+               cudaGetErrorString(code), file, line);
+       if (abort) {
+          exit(code);
+       }
     }
 }
 
@@ -355,7 +355,8 @@ void cuPFTransition(cuParticles *prop_particles,
             for (int j = 0; j < STATE_SIZE; j++) {
                 sum += DYNAMICS[i][j] * element[j];
             }
-            transition[i] = sum + cuGenerateGaussian(global_state, offset) * G_SIGMA;
+            transition[i] = sum + cuGenerateGaussian(
+               global_state, offset) * G_SIGMA;
         }        
         cuParticles nxt_particle;
         nxt_particle.x = transition[0];
@@ -524,6 +525,7 @@ void computeHOG(cuPFFeature *features, cuParticles *particles,
     cv::Size wsize = cv::Size(patch_sz/downsize, patch_sz/downsize);
     cv::Size bsize = cv::Size(patch_sz/downsize, patch_sz/downsize);
     cv::Size csize = cv::Size(patch_sz/(downsize * 2), patch_sz/(downsize * 2));
+    /*
     cv::Ptr<cv::cuda::HOG> hog = cv::cuda::HOG::create(wsize, bsize, csize);
     for (int i = 0; i < PARTICLES_SIZE; i++) {
         cv::Rect_<int> rect = cv::Rect_<int>(particles[i].x - patch_sz/2,
@@ -555,6 +557,7 @@ void computeHOG(cuPFFeature *features, cuParticles *particles,
             }
         }
     }
+    */
 }
 
 
@@ -563,8 +566,11 @@ void computeHOG(cuPFFeature *features, cuParticles *particles,
  */
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
-    const int SIZE = static_cast<int>(image.rows * image.cols) * sizeof(cuImage);
-    cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
+    const int SIZE = static_cast<int>(image.rows *
+                                      image.cols) * sizeof(cuImage);
+    // cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
+    cuImage *pixels = reinterpret_cast<cuImage*>(
+       malloc(sizeof(cuImage) * SIZE));
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             int index = i + (j * image.cols);
@@ -577,7 +583,7 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
 
     cudaEvent_t d_start;
     cudaEvent_t d_stop;
-    cudaEventCreate(&d_start); 
+    cudaEventCreate(&d_start);
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
 
@@ -614,7 +620,7 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     for (int j = 0; j < cpu_hist.rows; j++) {
         for (int i = 0; i < cpu_hist.cols; i++) {
             int offset = i + (j * cpu_hist.cols);
-            std::cout << "DIFF: " << cpu_hist.at<float>(j ,i)  << "  "
+            std::cout << "DIFF: " << cpu_hist.at<float>(j, i)  << "  "
                       << histogram[offset]  << "\n";
         }
     }
@@ -628,7 +634,8 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
 
 __device__ __forceinline__
 float cuEuclideanDist(cuParticles *a, cuParticles *b) {
-    float dist = ((a->x - b->x) * (a->x - b->x)) + ((a->y - b->y) * (a->y - b->y));
+    float dist = ((a->x - b->x) * (a->x - b->x)) +
+       ((a->y - b->y) * (a->y - b->y));
     return sqrtf(dist);
 }
 
@@ -659,13 +666,14 @@ void cuPFParticleLikelihoods(
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
 
-    if (offset < PARTICLES_SIZE) {        
+    if (offset < PARTICLES_SIZE) {
         
         float h_dist = FLT_MAX;
         int match_idx = -1;
         for (int i = 0; i < PARTICLES_SIZE; i++) {
-            // float d_hog = cuBhattacharyyaDist(templ_features[i].hog_hist,
-            //                                   features[offset].hog_hist, HOG_DIM);
+            // float d_hog = cuBhattacharyyaDist(
+            //    templ_features[i].hog_hist,
+            //    features[offset].hog_hist, HOG_DIM);
 
             float d_hog = cuBhattacharyyaDist(
                 templ_features[i].color_hist,
@@ -689,7 +697,7 @@ void cuPFParticleLikelihoods(
             float c_dist = h_dist;
             prob = 1.0f * expf(-COLOR_CONTRL * c_dist);
             
-            if (prob < PROBABILITY_THRESH) { 
+            if (prob < PROBABILITY_THRESH) {
                 prob = 0.0f;
             }
         }
@@ -706,7 +714,10 @@ void cuInitParticles(
     
     size_t dim = 4 * sizeof(float);
     float *d_corners;
-    cudaMalloc((void**)&d_corners, dim);
+    // cudaMalloc((void**)&d_corners, dim);
+
+    cudaMalloc(reinterpret_cast<void**>(&d_corners), dim);
+    
     cudaMemcpy(d_corners, box_corners, dim, cudaMemcpyHostToDevice);
     cudaMalloc((void**)&d_state_, PARTICLES_SIZE * sizeof(curandState_t));
     curandInit<<<grid_size, block_size>>>(d_state_, unsigned(time(NULL)));
@@ -747,7 +758,7 @@ void cuInitParticles(
     cudaMemcpy(particles_features_, d_features, sizeof(cuPFFeature) *
                PARTICLES_SIZE, cudaMemcpyDeviceToHost);
 
-    // cudaDeviceSynchronize();    
+    // cudaDeviceSynchronize();
 
     // computeHOG(particles_features_, particles, image, PATCH_SIZE, 1);
     
@@ -782,7 +793,8 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         }
     }
     
-    float *box_corners = (float*)malloc(4 * sizeof(float));
+    // float *box_corners = (float*)malloc(4 * sizeof(float));
+    float *box_corners = reinterpret_cast<float*>(malloc(4 * sizeof(float)));
     box_corners[0] = rect.x;
     box_corners[1] = rect.y;
     box_corners[2] = rect.x + rect.width;
@@ -793,7 +805,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
 
     cudaEvent_t d_start;
     cudaEvent_t d_stop;
-    cudaEventCreate(&d_start); 
+    cudaEventCreate(&d_start);
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
 
@@ -859,7 +871,8 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cudaMalloc((void**)&d_features, sizeof(cuPFFeature) * PARTICLES_SIZE);
         
         cuPFParticleFeatures<<<grid_size, block_size>>>(
-            d_features, d_image, d_particles, image.cols, image.rows, PATCH_SIZE/2);
+           d_features, d_image, d_particles, image.cols,
+           image.rows, PATCH_SIZE/2);
 
         /*
         cuPFFeature *particles_features = (cuPFFeature*)malloc(
@@ -904,8 +917,8 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cudaEventSynchronize(d_stop);
         float elapsed_time1;
         cudaEventElapsedTime(&elapsed_time1, d_start, d_stop);
-        std::cout << "\033[36m ELAPSED TIME BEFORE:  \033[0m" << elapsed_time1/1000.0f
-                  << "\n";
+        std::cout << "\033[36m ELAPSED TIME BEFORE:  \033[0m"
+                  << elapsed_time1/1000.0f << "\n";
         
         cudaEventRecord(d_start, 0);
         
@@ -967,9 +980,10 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
         cuPFSequentialResample<<<grid_size, block_size>>>(
             d_particles, d_trans_particles, d_probabilities, d_state_);
 
-        cuParticles *update_part = (cuParticles*)malloc(sizeof(cuParticles) *
-                                                        PARTICLES_SIZE);
-        cudaMemcpy(update_part, d_particles, sizeof(cuParticles) * PARTICLES_SIZE,
+        cuParticles *update_part = (cuParticles*)malloc(
+           sizeof(cuParticles) * PARTICLES_SIZE);
+        cudaMemcpy(update_part, d_particles, sizeof(cuParticles) *
+                   PARTICLES_SIZE,
                    cudaMemcpyDeviceToHost);
 
         printf("\033[32m UPDATING  \033[0m\n");

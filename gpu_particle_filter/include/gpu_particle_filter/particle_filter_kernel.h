@@ -9,8 +9,8 @@
 #include <curand_kernel.h>
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/cudaimgproc.hpp>
-#include <opencv2/cudaobjdetect.hpp>
+// #include <opencv2/cudaimgproc.hpp>
+// #include <opencv2/cudaobjdetect.hpp>
 
 // #include <gpu_particle_filter/color_histogram_kernel.h>
 
