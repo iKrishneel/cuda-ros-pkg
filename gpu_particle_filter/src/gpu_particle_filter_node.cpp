@@ -79,6 +79,8 @@ void ParticleFilterGPU::imageCB(
     cv::namedWindow("Tracking", cv::WINDOW_NORMAL);
     cv::imshow("image", image);
     cv::waitKey(3);
+
+    image.release();
 }
 
 int main(int argc, char *argv[]) {

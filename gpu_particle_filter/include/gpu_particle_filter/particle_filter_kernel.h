@@ -9,14 +9,10 @@
 #include <curand_kernel.h>
 
 #include <opencv2/opencv.hpp>
-// #include <opencv2/cudaimgproc.hpp>
-// #include <opencv2/cudaobjdetect.hpp>
-
-// #include <gpu_particle_filter/color_histogram_kernel.h>
 
 // filter params
 #define BLOCK_SIZE 16
-#define PARTICLES_SIZE 512
+#define PARTICLES_SIZE 1024
 #define STATE_SIZE 4
 #define G_SIGMA 5
 

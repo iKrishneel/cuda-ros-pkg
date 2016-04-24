@@ -1,5 +1,4 @@
 
-// #include <gpu_particle_filter/gpu_particle_filter.h>
 #include <gpu_particle_filter/particle_filter_kernel.h>
 
 #define CUDA_ERROR_CHECK(process) {                \
@@ -8,7 +7,7 @@
 
 void cudaAssert(cudaError_t code, char *file, int line, bool abort = true) {
     if (code != cudaSuccess) {
-       fprintf (stderr,"GPUassert: %s %s %dn",
+       fprintf(stderr, "GPUassert: %s %s %dn",
                cudaGetErrorString(code), file, line);
        if (abort) {
           exit(code);
@@ -122,7 +121,7 @@ __device__ __constant__
 float DYNAMICS[STATE_SIZE][STATE_SIZE] = {{1, 0, 1, 0},
                                           {0, 1, 0, 1},
                                           {0, 0, 1, 0},
-                                          {0, 0, 0, 1}};    
+                                          {0, 0, 0, 1}};
 
 __device__
 cuMat getPFDynamics() {
@@ -291,7 +290,7 @@ void cuPFSequentialResample(
     if (offset == 0) {
         // const float s_ptx = 1.0f/PARTICLES_SIZE; // change to gaussian
         float s_ptx = abs(cuGenerateGaussian(global_state, offset));
-        s_ptx *= (1.0f / PARTICLES_SIZE);        
+        s_ptx *= (1.0f / PARTICLES_SIZE);
         int cdf_stx = 1;
         for (int i = 0; i < PARTICLES_SIZE; i++) {
             float ptx = s_ptx + (1.0/PARTICLES_SIZE) * (i - 1);
@@ -589,7 +588,7 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
 
     
     cuImage *d_image;
-    cudaMalloc((void**)&d_image, SIZE);
+    cudaMalloc(reinterpret_cast<void**>(&d_image), SIZE);
     cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
 
     
@@ -931,31 +930,6 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
                                            particles_[i].y);
           cv::circle(image, center, 3, cv::Scalar(0, 255, 0), CV_FILLED);
        }
-       // cv::namedWindow("particels", cv::WINDOW_NORMAL);
-       // cv::imshow("particels", image);
-       // cv::waitKey(3);
-       // return;
-       // *-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*--
-       
-       // cudaEventRecord(d_stop, 0);
-       // cudaEventSynchronize(d_stop);
-       //  float elapsed_time;
-       //  cudaEventElapsedTime(&elapsed_time, d_start, d_stop);
-       //  std::cout << "\033[36m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
-       //            << "\n";
-        
-        /// ---------------------------------------
-
-        
-        // for (int i = 0; i < PARTICLES_SIZE; i++) {
-        //     cv::Point2f center = cv::Point2f(x_particles[i].x,
-        //                                      x_particles[i].y);
-        //     cv::circle(image, center, 3, cv::Scalar(0, 255, 255), CV_FILLED);
-
-        //     center = cv::Point2f(update_part[i].x, update_part[i].y);
-        //     cv::circle(image, center, 3, cv::Scalar(0, 255, 0), CV_FILLED);
-        // }
-
         cudaFree(d_features);
         cudaFree(d_probabilities);
         cudaFree(d_image);
@@ -987,6 +961,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventDestroy(d_stop);
     
     free(box_corners);
+    free(pixels);
     // free(particles);
     // cudaFree(d_state_);
 }
