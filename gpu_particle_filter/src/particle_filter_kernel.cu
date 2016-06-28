@@ -30,11 +30,11 @@ struct cuParticles{
     float dy;
 };
 
-__host__ __device__
-struct cuImage{
-    unsigned char pixel[3];
-};
 
+template<class T, int N> struct __align__(16) cuImage{
+    // unsigned char pixel[N];
+    T pixel[N];
+};
 
 __device__
 struct cuRect {
@@ -200,7 +200,7 @@ void cuPFInitalizeParticles(
         particles[offset] = particle;
 
         // printf("offset: %d, %f, %f\n", offset, particle.x, particle.y);
-    }    
+    }
 }
 
 __host__ __device__ __align__(16)
@@ -373,8 +373,120 @@ __global__ __forceinline__
 void cuPFPropagation(
     cuParticles *trans_particles,
     cuParticles *particles, curandState_t *global_state) {
-    // cuPFTransition(trans_particles, particles, global_state);    
+    // cuPFTransition(trans_particles, particles, global_state);
 }
+
+
+
+/**
+ * HOG
+ */
+
+__device__ __forceinline__
+void cuPFHOGBinVoting(float *angle, int *lower_index) {
+    float nearest_lower = 1e6;
+    *lower_index = 0;
+    for (int i = HOG_BIN_ANGLE/2; i < HOG_ANGLE; i += HOG_BIN_ANGLE) {
+       float distance = fabs(*angle - i);
+       if (static_cast<float>(i) < *angle) {
+          if (distance < nearest_lower) {
+             nearest_lower = distance;
+             *lower_index = i;
+          }
+       }
+    }
+}
+
+__device__ __forceinline__
+void cuPFHOGBlockGradient(cuImage<float, HOG_FEATURE_DIMS> *block_hog,
+                          cuImage<float, HOG_NBINS> *bins,
+                          const int index, const int stride) {
+    int icounter = 0;
+    float ssums = 0.0f;
+    for (int j = 0; j < HOG_BLOCK; j++) {
+       for (int i = 0; i < HOG_BLOCK; i++) {
+          int ind = i + (j + stride) + index;
+          for (int k = 0; k < HOG_NBINS; k++) {
+             block_hog[0].pixel[icounter] = bins[ind].pixel[k];
+             ssums += block_hog[0].pixel[icounter];
+             icounter++;
+          }
+       }
+    }
+    ssums = sqrtf(ssums);
+    for (int i = 0; i < HOG_FEATURE_DIMS; i++) {
+       block_hog[0].pixel[i] /= ssums;
+    }
+}
+
+__global__ __forceinline__
+void cuPFHOGImageGradient(cuImage<float, HOG_NBINS> *im_grad,
+                          cuImage<float, 1> *im_ang, int width, int height) {
+    int  t_idx = (threadIdx.x + blockIdx.x * blockDim.x);
+    int t_idy = (threadIdx.y + blockIdx.y * blockDim.y);
+    int offset = t_idx + t_idy * blockDim.x * gridDim.x;
+    
+    int image_size = (width * height)/(HOG_CELL * HOG_CELL);
+
+    extern __shared__ cuImage<float, HOG_NBINS> orientation_histogram[];
+    __shared__ int icounter;
+    if (offset == 0) {
+       icounter = 0;
+    }
+    __syncthreads();
+
+    if (offset < image_size) {
+       int index = offset/HOG_CELL;
+       // for (int i = 0; i < HOG_NBINS; i++) {
+       //    orientation_histogram[offset].pixel[i] = 0.0f;
+       // }
+       atomicAdd(&icounter, 1);
+    }
+    __syncthreads();
+
+    if (offset < image_size) {
+       float bin[HOG_NBINS];
+       for (int i = 0; i < HOG_NBINS; i++) {
+          bin[i] = 0;
+       }
+       int index = offset * HOG_CELL;
+       for (int j = t_idy; j < t_idy + HOG_CELL; j++) {
+          for (int i = t_idx; i < t_idx + HOG_CELL; i++) {
+             float angle = static_cast<float>(im_ang[index].pixel[0]);
+             int l_bin = 0;
+             cuPFHOGBinVoting(&angle, &l_bin);
+             float l_ratio = 1.0f - (angle - l_bin)/HOG_BIN_ANGLE;
+             int l_index = (l_bin - (HOG_BIN_ANGLE/2))/HOG_BIN_ANGLE;
+             bin[l_index] += (im_ang[index].pixel[0] * l_ratio);
+             bin[l_index + 1] += (im_ang[index].pixel[0] * (1.0f - l_ratio));
+          }
+       }
+       for (int i = 0; i < HOG_NBINS; i++) {
+          orientation_histogram[offset].pixel[i] = bin[i];
+       }
+    }
+
+    __shared__ int stride;
+    if (offset == 0) {
+       stride = static_cast<int>(width/HOG_CELL);
+    }
+    __syncthreads();
+    
+    if (offset < image_size) {
+       int index = offset * HOG_CELL;
+       cuImage<float, HOG_FEATURE_DIMS> block_hog[1];
+       cuPFHOGBlockGradient(block_hog, orientation_histogram, index, stride);
+
+       
+    }
+
+}
+
+/**
+ * END HOG
+ */
+
+
 
 
 
@@ -383,7 +495,7 @@ void cuPFPropagation(
  */
 __global__ __forceinline__
 void cuPFColorHistogram(
-    int *histogram, cuImage *image, int width, int height) {
+    int *histogram, cuImage<unsigned char, 3> *image, int width, int height) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
@@ -425,7 +537,8 @@ void cuPFRoiCondition(
 
 __device__ __forceinline__
 int *cuPFGetROIHistogram(
-    cuImage *image, cuParticles particle, int width, int height, int patch_sz) {
+    cuImage<unsigned char, 3> *image, cuParticles particle, int width,
+    int height, int patch_sz) {
     int histogram[COLOR_BINS * COLOR_CHANNEL];
     for (int i = 0; i < COLOR_BINS * COLOR_CHANNEL; i++) {
         histogram[i] = 0;
@@ -460,7 +573,7 @@ int *cuPFGetROIHistogram(
 
 __global__ __forceinline__
 void cuPFParticleFeatures(
-    cuPFFeature *color_features, cuImage *image, cuParticles *particles,
+    cuPFFeature *color_features, cuImage<unsigned char, 3> *image, cuParticles *particles,
     int width, int height, int patch_sz) {
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
@@ -566,10 +679,9 @@ void computeHOG(cuPFFeature *features, cuParticles *particles,
 
 void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     const int SIZE = static_cast<int>(image.rows *
-                                      image.cols) * sizeof(cuImage);
-    // cuImage *pixels = (cuImage*)malloc(sizeof(cuImage) * SIZE);
-    cuImage *pixels = reinterpret_cast<cuImage*>(
-       malloc(sizeof(cuImage) * SIZE));
+                                      image.cols) * sizeof(cuImage<unsigned char, 3>);
+    cuImage<unsigned char, 3> *pixels = reinterpret_cast<cuImage<unsigned char, 3>*>(
+       malloc(sizeof(cuImage<unsigned char, 3>) * SIZE));
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             int index = i + (j * image.cols);
@@ -587,7 +699,7 @@ void gpuHist(cv::Mat image, cv::Mat cpu_hist) {
     cudaEventRecord(d_start, 0);
 
     
-    cuImage *d_image;
+    cuImage<unsigned char, 3> *d_image;
     cudaMalloc(reinterpret_cast<void**>(&d_image), SIZE);
     cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
 
@@ -733,9 +845,9 @@ void cuInitParticles(
     // cudaDeviceSynchronize();
 
     const int SIZE = static_cast<int>(image.rows * image.cols) *
-       sizeof(cuImage);
-    cuImage *pixels = reinterpret_cast<cuImage*>(
-       malloc(sizeof(cuImage) * SIZE));
+       sizeof(cuImage<unsigned char, 3>);
+    cuImage<unsigned char, 3> *pixels = reinterpret_cast<cuImage<unsigned char, 3>*>(
+       malloc(sizeof(cuImage<unsigned char, 3>) * SIZE));
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             int index = i + (j * image.cols);
@@ -745,7 +857,7 @@ void cuInitParticles(
             }
         }
     }
-    cuImage *d_image;
+    cuImage<unsigned char, 3> *d_image;
     cudaMalloc(reinterpret_cast<void**>(&d_image), SIZE);
     cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
         
@@ -785,9 +897,9 @@ void cuInitParticles(
 __host__
 void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     const int SIZE = static_cast<int>(image.rows * image.cols) *
-       sizeof(cuImage);
-    cuImage *pixels = reinterpret_cast<cuImage*>(
-       malloc(sizeof(cuImage) * SIZE));
+       sizeof(cuImage<unsigned char, 3>);
+    cuImage<unsigned char, 3> *pixels = reinterpret_cast<cuImage<
+       unsigned char, 3>*>(malloc(sizeof(cuImage<unsigned char, 3>) * SIZE));
     for (int j = 0; j < image.rows; j++) {
         for (int i = 0; i < image.cols; i++) {
             int index = i + (j * image.cols);
@@ -797,7 +909,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
             }
         }
     }
-    
+
     // float *box_corners = (float*)malloc(4 * sizeof(float));
     float *box_corners = reinterpret_cast<float*>(malloc(4 * sizeof(float)));
     box_corners[0] = rect.x;
@@ -814,6 +926,46 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
     cudaEventCreate(&d_stop);
     cudaEventRecord(d_start, 0);
 
+    
+    /**
+     * TEST
+     */
+
+    cuImage<unsigned char, 3> *d_image;
+    cudaMalloc(reinterpret_cast<void**>(&d_image), SIZE);
+    cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
+    
+    cuImage<float, HOG_NBINS> *d_hog;
+    cudaMalloc(reinterpret_cast<void**>(&d_hog),
+               sizeof(cuImage<float, HOG_NBINS>) * image.cols * image.rows);
+
+    cuImage<float, 1> *d_temp;
+    cudaMalloc(reinterpret_cast<void**>(&d_temp),
+               sizeof(cuImage<float, 1>) * image.cols * image.rows);
+
+    cuPFHOGImageGradient<<<grid_size, block_size>>>(d_hog, d_temp,
+                                                    640, 480);
+    
+    // cudaDeviceSynchronize();
+    cudaEventRecord(d_stop, 0);
+    cudaEventSynchronize(d_stop);
+    float elapsed_time1;
+    cudaEventElapsedTime(&elapsed_time1, d_start, d_stop);
+    std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time1/1000.0f
+              << "\n";
+    
+    cudaFree(d_hog);
+    cudaFree(d_temp);
+    cudaFree(d_image);
+    free(pixels);
+    return;
+    /**
+     * end test
+     */
+
+
+
+    
 
     bool is_on = true;
     if (is_init) {
@@ -855,7 +1007,7 @@ void particleFilterGPU(cv::Mat &image, cv::Rect &rect, bool &is_init) {
        printf("\033[32m COMPUTING WEIGHT  \033[0m\n");
 
        // ********************************
-       cuImage *d_image;
+       cuImage<unsigned char, 3> *d_image;
        cudaMalloc(reinterpret_cast<void**>(&d_image), SIZE);
        cudaMemcpy(d_image, pixels, SIZE, cudaMemcpyHostToDevice);
        

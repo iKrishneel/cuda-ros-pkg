@@ -26,6 +26,14 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}
 find_package(CUDA REQUIRED)
 include(FindCUDA)
 
+#set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -gencode arch=compute_52,code=sm_52)
+set(CUDA_NVCC_FLAGS 
+  --generate-code arch=compute_52,code=sm_52
+  #--generate-code arch=compute_20,code=sm_21 
+  #--generate-code arch=compute_30,code=sm_30 
+  #--generate-code arch=compute_35,code=sm_35
+)
+
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
 ## See http://ros.org/doc/api/catkin/html/user_guide/setup_dot_py.html
@@ -150,6 +158,9 @@ cuda_add_executable(gpu_particle_filter_node
 #add_dependencies(gpu_particle_filter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Specify libraries to link a library or executable target against
+
+CUDA_ADD_CUBLAS_TO_TARGET(gpu_particle_filter_node)
+
 target_link_libraries(gpu_particle_filter_node
   ${catkin_LIBRARIES}
 )

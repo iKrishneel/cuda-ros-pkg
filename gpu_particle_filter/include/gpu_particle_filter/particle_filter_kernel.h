@@ -8,11 +8,14 @@
 #include <curand.h>
 #include <curand_kernel.h>
 
+#include <cublas.h>
+#include <cublas_v2.h>
+
 #include <opencv2/opencv.hpp>
 
 // filter params
 #define BLOCK_SIZE 16
-#define PARTICLES_SIZE 1024
+#define PARTICLES_SIZE 10
 #define STATE_SIZE 4
 #define G_SIGMA 5
 
@@ -26,6 +29,13 @@
 #define PROBABILITY_THRESH 0.9
 #define COLOR_CONTRL 0.7
 #define HOG_CONTRL 0.7
+
+#define HOG_CELL 8
+#define HOG_BLOCK 2
+#define HOG_NBINS 9
+#define HOG_ANGLE 180
+#define HOG_BIN_ANGLE (HOG_ANGLE/HOG_NBINS)
+#define HOG_FEATURE_DIMS (HOG_BLOCK * HOG_BLOCK * HOG_NBINS)
 
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
 void gpuHist(cv::Mat, cv::Mat);
