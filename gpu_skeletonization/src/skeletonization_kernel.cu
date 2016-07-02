@@ -27,7 +27,8 @@ void skeletonizationKernel(unsigned char *d_marker, unsigned char *d_image,
     int t_idx = threadIdx.x + blockIdx.x * blockDim.x;
     int t_idy = threadIdx.y + blockIdx.y * blockDim.y;
     int offset = t_idx + t_idy * blockDim.x * gridDim.x;
-    
+
+    unsigned int marker = 0;
     if ((t_idx > 0 && t_idx < width - 1) &&
         (t_idy > 0 && t_idy < height - 1)) {
        unsigned char val[9] = {};
@@ -52,23 +53,27 @@ void skeletonizationKernel(unsigned char *d_marker, unsigned char *d_image,
           : (val[3] * val[5] * val[1]);
        if (A == 1 && (B >= 2 && B <= 6) && m1 == 0 && m2 == 0) {
           d_marker[offset] = 1;
+          marker = 1;
        } else {
           d_marker[offset] = 0;
+          marker = 0;
        }
     }
     __syncthreads();
     
     if (offset < width * height) {
-       d_image[offset] &= ~d_marker[offset];
+       // d_image[offset] &= ~d_marker[offset];
+       d_image[offset] &= ~marker;
     }
     
-
+    /*
     __syncthreads();
 
     if ((t_idx > 0 && t_idx < width - 1) &&
         (t_idy > 0 && t_idy < height - 1)) {
        d_marker[offset] = 0.0f;
     }
+    */
 }
 
 void skeletonizationGPU(cv::Mat image) {
@@ -114,7 +119,8 @@ void skeletonizationGPU(cv::Mat image) {
        cudaDeviceSynchronize();
 
        cudaMemcpy(temp_data, d_image, dev_mal, cudaMemcpyDeviceToHost);
-       
+
+       is_zero = true;
        for (int i = 0; i < im_size; i++) {
           if (std::abs(temp_data[i] - prev_data[i]) > 0) {
              is_zero = false;
@@ -125,7 +131,7 @@ void skeletonizationGPU(cv::Mat image) {
        if (icounter++ == 1000) {
           is_zero = true;
        }
-    //    // std::cout << "ITERATING..."  << icounter++ << "\n";
+       std::cout << "ITERATING..."  << icounter << "\n";
        
     } while (!is_zero);
     
