@@ -37,6 +37,9 @@
 #define HOG_BIN_ANGLE (HOG_ANGLE/HOG_NBINS)
 #define HOG_FEATURE_DIMS (HOG_BLOCK * HOG_BLOCK * HOG_NBINS)
 
+
+#define IMAGE_SIZE ((640/HOG_CELL) * (480/HOG_CELL))
+
 void particleFilterGPU(cv::Mat &, cv::Rect &, bool &);
 void gpuHist(cv::Mat, cv::Mat);
 

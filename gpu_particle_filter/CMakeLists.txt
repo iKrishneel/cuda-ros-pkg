@@ -28,6 +28,7 @@ include(FindCUDA)
 
 #set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -gencode arch=compute_52,code=sm_52)
 set(CUDA_NVCC_FLAGS 
+  --generate-code arch=compute_50,code=sm_50
   --generate-code arch=compute_52,code=sm_52
   #--generate-code arch=compute_20,code=sm_21 
   #--generate-code arch=compute_30,code=sm_30 
@@ -159,7 +160,7 @@ cuda_add_executable(gpu_particle_filter_node
 
 ## Specify libraries to link a library or executable target against
 
-CUDA_ADD_CUBLAS_TO_TARGET(gpu_particle_filter_node)
+#CUDA_ADD_CUBLAS_TO_TARGET(gpu_particle_filter_node)
 
 target_link_libraries(gpu_particle_filter_node
   ${catkin_LIBRARIES}
