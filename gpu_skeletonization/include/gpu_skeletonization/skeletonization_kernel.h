@@ -14,8 +14,7 @@
 #include <opencv2/opencv.hpp>
 
 #define GRID_SIZE 16
-enum {
-    EVEN, ODD };
+
 
 void skeletonizationGPU(cv::Mat);
 

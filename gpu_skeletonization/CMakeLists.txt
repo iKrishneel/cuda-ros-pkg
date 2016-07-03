@@ -26,8 +26,8 @@ include(FindCUDA)
 set(CUDA_NVCC_FLAGS 
   --generate-code arch=compute_50,code=sm_50
   --generate-code arch=compute_52,code=sm_52
-  #--generate-code arch=compute_20,code=sm_21 
-  #--generate-code arch=compute_30,code=sm_30 
+  # --generate-code arch=compute_20,code=sm_21 
+  # --generate-code arch=compute_30,code=sm_30 
   ####--generate-code arch=compute_35,code=sm_35
 )
 

@@ -3,12 +3,19 @@
 
 GPUSkeletonization::GPUSkeletonization() {
 
-    cv::Mat image = cv::imread("/home/krishneel/Desktop/mbzirc/mask.png");
-    std::cout << image.size()  << "\n";
+    int icounter = 0;
+    while (icounter++ < 50) {
+       cv::Mat image = cv::imread("/home/krishneel/Desktop/mbzirc/mask.png");
+       cv::resize(image, image, cv::Size(1280, 960));
+       std::cout << image.size()  << "\n";
+    
+       skeletonizationGPU(image);
 
-    skeletonizationGPU(image);
+       ROS_WARN("DONE");
 
-    ROS_WARN("DONE");
+       cv::imshow("input", image);
+       cv::waitKey(30);
+    }
 }
 
 void GPUSkeletonization::onInit() {
