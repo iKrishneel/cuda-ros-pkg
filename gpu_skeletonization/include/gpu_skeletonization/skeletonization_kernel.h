@@ -16,7 +16,7 @@
 #define GRID_SIZE 16
 
 
-void skeletonizationGPU(cv::Mat);
+void skeletonizationGPU(cv::Mat &);
 
 
 #endif   // _SKELETONIZATION_KERNEL_H_

@@ -88,21 +88,16 @@ void cuAbsDiff(int *value, unsigned char *d_image, unsigned char *d_prev,
     }
 }
 
-void skeletonizationGPU(cv::Mat image) {
+void skeletonizationGPU(cv::Mat &image) {
     if (image.type() != CV_8UC1) {
        cv::cvtColor(image, image, CV_BGR2GRAY);
     }
-
-    std::cout << "RUNNING.."  << "\n";
-    
     const int im_size = image.rows * image.cols;
     unsigned char data[im_size];
-    unsigned char prev_data[im_size];
     for (int j = 0; j < image.rows; j++) {
        for (int i = 0; i < image.cols; i++) {
           int index = i + (j * image.cols);
           data[index] = image.at<uchar>(j, i)/255;
-          prev_data[index] = 0;
        }
     }
 
@@ -153,33 +148,6 @@ void skeletonizationGPU(cv::Mat image) {
           cudaMemcpy(temp_data, d_image, dev_mal, cudaMemcpyDeviceToHost);
        }
 
-
-
-       // cudaMemcpy(temp_data, d_image, dev_mal, cudaMemcpyDeviceToHost);
-       // is_zero = true;
-       // int icount = 0;
-       // for (int i = 0; i < im_size; i++) {
-       //    if (std::abs(temp_data[i] - prev_data[i]) > 0) {
-       //       is_zero = false;
-       //       icount++;
-       //    }
-       //    prev_data[i] = temp_data[i];
-       // }
-       
-       // if (icounter++ == 1000) {
-       //    is_zero = true;
-       // }
-          
-       
-       // if (icounter == 10000) {
-       //    is_zero = true;
-       //    cudaMemcpy(temp_data, d_image, dev_mal, cudaMemcpyDeviceToHost);
-       // }
-
-       
-       std::cout << "Iteration: " << icounter++ << "\n";
-       
-
     } while (!is_zero);
     
     cudaEventRecord(d_stop, 0);
@@ -189,21 +157,16 @@ void skeletonizationGPU(cv::Mat image) {
 
     std::cout << "\033[33m ELAPSED TIME:  \033[0m" << elapsed_time/1000.0f
               << "\n";
+    
+    icounter = 0;
+    for (int i = 0; i < image.rows; i++) {
+       for (int j = 0; j < image.cols; j++) {
+          image.at<uchar>(i, j) = temp_data[icounter++] * 255;
+       }
+    }
 
     cudaFree(d_image);
     cudaFree(d_prev);
     cudaFree(d_count);
-    // free(data);
-    
-    icounter = 0;
-    cv::Mat img = cv::Mat::zeros(image.size(), CV_8UC1);
-    for (int i = 0; i < image.rows; i++) {
-       for (int j = 0; j < image.cols; j++) {
-          img.at<uchar>(i, j) = temp_data[icounter++] * 255;
-       }
-    }
-    cv::namedWindow("image", cv::WINDOW_FREERATIO);
-    cv::imshow("image", img);
-    // cv::waitKey(30);
 }
 
