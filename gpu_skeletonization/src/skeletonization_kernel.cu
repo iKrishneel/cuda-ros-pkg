@@ -40,7 +40,6 @@ void skeletonizationKernel(unsigned char *d_image,
              icounter++;
           }
        }
-       
        int A = (val[3] == 0 && val[6] == 1) + (val[6] == 0 && val[7] == 1)
           + (val[7] == 0 && val[8] == 1) + (val[8] == 0 && val[5] == 1)
           + (val[5] == 0 && val[2] == 1) + (val[2] == 0 && val[1] == 1)

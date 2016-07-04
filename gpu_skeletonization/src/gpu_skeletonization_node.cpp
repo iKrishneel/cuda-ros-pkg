@@ -6,7 +6,7 @@ GPUSkeletonization::GPUSkeletonization() {
     int icounter = 0;
     while (icounter++ < 50) {
        cv::Mat image = cv::imread("/home/krishneel/Desktop/mbzirc/mask.png");
-       cv::resize(image, image, cv::Size(1280, 960));
+       // cv::resize(image, image, cv::Size(1280, 960));
        std::cout << image.size()  << "\n";
     
        skeletonizationGPU(image);
